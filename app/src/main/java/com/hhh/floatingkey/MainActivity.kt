@@ -1,11 +1,16 @@
 package com.hhh.floatingkey
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.database.ContentObserver
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
@@ -38,6 +43,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -53,6 +59,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -174,11 +181,21 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // 后台探测特权状态，并按需自动检查更新
+    // 后台探测特权状态（Root/Shizuku 时顺带自动授予 WRITE_SECURE_SETTINGS），并按需自动检查更新
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             PrivilegedShell.refreshRoot()
             PrivilegedShell.refreshShizuku()
+            // 有 Root / Shizuku 就直接把 WRITE_SECURE_SETTINGS 授予自己，
+            // 这样即使停留在 ADB 模式也能真正切换输入法
+            if (!ImeSwitcher.hasSecureSettings(context)) {
+                when {
+                    PrivilegedShell.rootAvailable ->
+                        PrivilegedShell.grantSecureSettings(context, PrivilegeMode.ROOT)
+                    PrivilegedShell.shizukuAvailable ->
+                        PrivilegedShell.grantSecureSettings(context, PrivilegeMode.SHIZUKU)
+                }
+            }
         }
         refreshStatuses()
         if (Prefs.isAutoUpdate(context)) {
@@ -204,16 +221,80 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         }
     }
 
-    // 状态自动刷新（输入法启用/选中状态等）
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(2000)
-            refreshStatuses()
+    // 系统广播 + Settings 变更监听：输入法被启用/选中时即时刷新（不再轮询）
+    DisposableEffect(Unit) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                refreshStatuses()
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_INPUT_METHOD_CHANGED)
+            addAction("android.intent.action.INPUT_METHOD_CHANGED")
+        }
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            filter,
+            ContextCompat.RECEIVER_EXPORTED
+        )
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                refreshStatuses()
+            }
+        }
+        listOf(
+            Settings.Secure.DEFAULT_INPUT_METHOD,
+            Settings.Secure.ENABLED_INPUT_METHODS,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+            Settings.Secure.ACCESSIBILITY_ENABLED
+        ).forEach { key ->
+            try {
+                context.contentResolver.registerContentObserver(
+                    Settings.Secure.getUriFor(key),
+                    false,
+                    observer
+                )
+            } catch (t: Throwable) {
+                // ignore
+            }
+        }
+        onDispose {
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (t: Throwable) {
+                // ignore
+            }
+            try {
+                context.contentResolver.unregisterContentObserver(observer)
+            } catch (t: Throwable) {
+                // ignore
+            }
         }
     }
 
+    val autoHintReady = autoSwitch && imeEnabled && privilegedReady &&
+        (accessibilityOn || privilegeMode != PrivilegeMode.ADB)
+    val autoHint = when {
+        !autoSwitch -> "自动切换已关闭"
+        !imeEnabled -> "「悬浮按键输入法」未在系统设置中启用，无法自动切换"
+        !privilegedReady -> "缺少「${privilegeMode.label}」授权，无法写入系统输入法设置"
+        !accessibilityOn && privilegeMode == PrivilegeMode.ADB ->
+            "ADB 模式需开启无障碍服务才能检测输入框"
+        !accessibilityOn -> "将由「${privilegeMode.label}」轮询检测前台应用（未开启无障碍）"
+        else -> "自动切换已就绪"
+    }
+
     Scaffold(
-        topBar = { TopAppBar(title = { Text("悬浮按键") }) }
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            TopAppBar(
+                title = { Text("悬浮按键") },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background
+                )
+            )
+        }
     ) { padding ->
         Column(
             modifier = Modifier
@@ -535,15 +616,62 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                         status = when {
                             accessibilityOn -> "已开启"
                             privilegeMode != PrivilegeMode.ADB && privilegedReady ->
-                                "未开启（将使用$privilegeMode 轮询）"
-                            else -> "未开启（ADB 模式需要开启）"
+                                "未开启（将用 ${privilegeMode.label} 轮询检测）"
+                            else -> "未开启（ADB 模式必须开启）"
                         },
-                        ok = accessibilityOn || (privilegeMode != PrivilegeMode.ADB && privilegedReady)
+                        ok = accessibilityOn ||
+                            (privilegeMode != PrivilegeMode.ADB && privilegedReady)
                     ) {
-                        OutlinedButton(onClick = { openAccessibilitySettings(context) }) {
-                            Text(if (accessibilityOn) "设置" else "去开启")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (privilegeMode != PrivilegeMode.ADB && privilegedReady) {
+                                OutlinedButton(
+                                    onClick = {
+                                        scope.launch {
+                                            withContext(Dispatchers.IO) {
+                                                if (accessibilityOn) {
+                                                    PrivilegedShell.disableAccessibility(
+                                                        context, privilegeMode
+                                                    )
+                                                } else {
+                                                    PrivilegedShell.enableAccessibility(
+                                                        context, privilegeMode
+                                                    )
+                                                }
+                                            }
+                                            accessibilityOn = AutoSwitchService.isEnabled(context)
+                                            toast(
+                                                context,
+                                                if (accessibilityOn) "无障碍服务已开启"
+                                                else "无障碍服务已关闭"
+                                            )
+                                        }
+                                    }
+                                ) { Text(if (accessibilityOn) "自动关闭" else "自动开启") }
+                            }
+                            OutlinedButton(onClick = { openAccessibilitySettings(context) }) {
+                                Text(if (accessibilityOn) "设置" else "去开启")
+                            }
                         }
                     }
+
+                    Text(
+                        text = autoHint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (autoHintReady) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.error
+                    )
+
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                val result = withContext(Dispatchers.IO) {
+                                    ImeSwitcher.trySwitchToOurs(context)
+                                }
+                                toast(context, result.message)
+                                refreshStatuses()
+                            }
+                        }
+                    ) { Text("测试切换输入法") }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),

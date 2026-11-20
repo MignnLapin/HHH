@@ -7,11 +7,21 @@ import android.content.pm.PackageManager
 import android.provider.Settings
 import android.view.inputmethod.InputMethodManager
 
+/** 自动切换输入法的结果，用于界面提示与日志。 */
+enum class SwitchResult(val message: String) {
+    OK("已切换到悬浮按键输入法"),
+    NOTHING("当前已是悬浮按键输入法"),
+    AUTO_OFF("自动切换已关闭"),
+    IME_NOT_ENABLED("「悬浮按键输入法」未在系统设置中启用"),
+    NO_PERMISSION("缺少授权，请先完成「权限方式」设置"),
+    WRITE_FAILED("写入系统输入法设置失败")
+}
+
 /**
  * 输入法切换。三种权限方式：
  * - ADB：WRITE_SECURE_SETTINGS（adb shell pm grant 一次性授权）
- * - Root：su -c settings put
- * - Shizuku：通过 Shizuku shell 执行
+ * - Root：su 执行；可自动 pm grant 本应用，之后直接写 Settings
+ * - Shizuku：通过 Shizuku shell 执行；同样可自动授权
  */
 object ImeSwitcher {
 
@@ -29,45 +39,61 @@ object ImeSwitcher {
     fun isOurImeActive(context: Context): Boolean =
         currentImeId(context) == ourImeId(context)
 
-    fun isOurImeEnabled(context: Context): Boolean {
+    fun hasSecureSettings(context: Context): Boolean =
+        context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) ==
+            PackageManager.PERMISSION_GRANTED
+
+    fun isOurImeEnabled(context: Context): Boolean = enabledImeIds(context).contains(ourImeId(context))
+
+    private fun enabledImeIds(context: Context): List<String> {
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        return imm.enabledInputMethodList.any { it.id == ourImeId(context) }
+        val fromManager = try {
+            imm.enabledInputMethodList.map { it.id }
+        } catch (t: Throwable) {
+            emptyList()
+        }
+        if (fromManager.isNotEmpty()) return fromManager
+        return Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ENABLED_INPUT_METHODS
+        )?.split(':')?.filter { it.isNotBlank() } ?: emptyList()
     }
 
-    /** 当前权限方式是否可用（会做一次阻塞检测）。 */
-    fun canSwitch(context: Context): Boolean = when (Prefs.getPrivilegeMode(context)) {
-        PrivilegeMode.ROOT -> PrivilegedShell.rootAvailable || PrivilegedShell.refreshRoot()
-        PrivilegeMode.SHIZUKU ->
-            PrivilegedShell.shizukuAvailable || PrivilegedShell.refreshShizuku()
-        PrivilegeMode.ADB ->
-            context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) ==
-                PackageManager.PERMISSION_GRANTED
+    private fun isImeEnabled(context: Context, imeId: String) = enabledImeIds(context).contains(imeId)
+
+    /** 当前权限方式是否可用（会做一次阻塞探测）。 */
+    fun canSwitch(context: Context): Boolean {
+        if (hasSecureSettings(context)) return true
+        return when (Prefs.getPrivilegeMode(context)) {
+            PrivilegeMode.ROOT -> PrivilegedShell.rootAvailable || PrivilegedShell.refreshRoot()
+            PrivilegeMode.SHIZUKU ->
+                PrivilegedShell.shizukuAvailable || PrivilegedShell.refreshShizuku()
+            PrivilegeMode.ADB -> false
+        }
     }
 
-    fun canSwitchCached(context: Context): Boolean = when (Prefs.getPrivilegeMode(context)) {
-        PrivilegeMode.ROOT -> PrivilegedShell.rootAvailable
-        PrivilegeMode.SHIZUKU -> PrivilegedShell.shizukuAvailable
-        PrivilegeMode.ADB ->
-            context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) ==
-                PackageManager.PERMISSION_GRANTED
+    fun canSwitchCached(context: Context): Boolean {
+        if (hasSecureSettings(context)) return true
+        return when (Prefs.getPrivilegeMode(context)) {
+            PrivilegeMode.ROOT -> PrivilegedShell.rootAvailable
+            PrivilegeMode.SHIZUKU -> PrivilegedShell.shizukuAvailable
+            PrivilegeMode.ADB -> false
+        }
     }
 
-    private fun isEnabled(context: Context, imeId: String): Boolean {
-        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        return imm.enabledInputMethodList.any { it.id == imeId }
-    }
-
-    /** 切换到本应用的输入法，并记住切换前的输入法以便恢复。 */
-    fun switchToOurs(context: Context): Boolean {
-        if (!Prefs.isAutoSwitchEnabled(context)) return false
-        if (!canSwitchCached(context) && !canSwitch(context)) return false
-        if (!isOurImeEnabled(context)) return false
+    /** 切换到本应用输入法，返回具体结果便于提示。 */
+    fun trySwitchToOurs(context: Context): SwitchResult {
+        if (!Prefs.isAutoSwitchEnabled(context)) return SwitchResult.AUTO_OFF
+        if (!isOurImeEnabled(context)) return SwitchResult.IME_NOT_ENABLED
+        if (!canSwitch(context)) return SwitchResult.NO_PERMISSION
         val ours = ourImeId(context)
         val current = currentImeId(context)
-        if (current == ours) return true
+        if (current == ours) return SwitchResult.NOTHING
         if (current != null) Prefs.setRestoreIme(context, current)
-        return writeDefaultIme(context, ours)
+        return if (writeDefaultIme(context, ours)) SwitchResult.OK else SwitchResult.WRITE_FAILED
     }
+
+    fun switchToOurs(context: Context): Boolean = trySwitchToOurs(context) == SwitchResult.OK
 
     /** 恢复自动切换前的输入法。 */
     fun restorePrevious(context: Context): Boolean {
@@ -78,7 +104,7 @@ object ImeSwitcher {
             return true
         }
         val previous = Prefs.getRestoreIme(context) ?: return false
-        if (previous == ourImeId(context) || !isEnabled(context, previous)) {
+        if (previous == ourImeId(context) || !isImeEnabled(context, previous)) {
             Prefs.setRestoreIme(context, null)
             return false
         }
@@ -88,27 +114,23 @@ object ImeSwitcher {
     }
 
     private fun writeDefaultIme(context: Context, imeId: String): Boolean {
+        // 有 WRITE_SECURE_SETTINGS 时直接写（最快，且不依赖 shell）
+        if (hasSecureSettings(context)) {
+            return try {
+                Settings.Secure.putString(
+                    context.contentResolver,
+                    Settings.Secure.DEFAULT_INPUT_METHOD,
+                    imeId
+                ) && currentImeId(context) == imeId
+            } catch (e: Exception) {
+                false
+            }
+        }
         val mode = Prefs.getPrivilegeMode(context)
-        if (mode != PrivilegeMode.ADB) {
-            val out = PrivilegedShell.exec(
-                mode,
-                "settings put secure default_input_method $imeId"
-            ) ?: return false
-            // settings put 无输出；读回校验
-            return currentImeId(context) == imeId ||
-                PrivilegedShell.exec(
-                    mode,
-                    "settings get secure default_input_method"
-                )?.trim() == imeId
-        }
-        return try {
-            Settings.Secure.putString(
-                context.contentResolver,
-                Settings.Secure.DEFAULT_INPUT_METHOD,
-                imeId
-            )
-        } catch (e: Exception) {
-            false
-        }
+        if (mode == PrivilegeMode.ADB) return false
+        val out = PrivilegedShell.exec(mode, "settings put secure default_input_method $imeId") ?: return false
+        if (currentImeId(context) == imeId) return true
+        return PrivilegedShell.exec(mode, "settings get secure default_input_method")
+            ?.trim() == imeId && out.isNotEmpty()
     }
 }

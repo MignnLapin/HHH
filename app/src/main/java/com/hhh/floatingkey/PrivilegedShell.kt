@@ -1,5 +1,8 @@
 package com.hhh.floatingkey
 
+import android.Manifest
+import android.content.ComponentName
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.ParcelFileDescriptor
 import moe.shizuku.server.IShizukuService
@@ -56,6 +59,39 @@ object PrivilegedShell {
         PrivilegeMode.ROOT -> execRoot(command)
         PrivilegeMode.SHIZUKU -> execShizuku(command)
         PrivilegeMode.ADB -> null
+    }
+
+    /** 用 Root / Shizuku 把 WRITE_SECURE_SETTINGS 授予本应用，之后可直接写系统设置。 */
+    fun grantSecureSettings(context: Context, mode: PrivilegeMode): Boolean {
+        if (mode == PrivilegeMode.ADB) return false
+        exec(mode, "pm grant ${context.packageName} android.permission.WRITE_SECURE_SETTINGS")
+        return context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    /** 用 Root / Shizuku 直接开启无障碍服务（免手动去设置里点）。 */
+    fun enableAccessibility(context: Context, mode: PrivilegeMode): Boolean {
+        if (mode == PrivilegeMode.ADB) return false
+        val component = ComponentName(context, AutoSwitchService::class.java).flattenToString()
+        val cmd = "c=\$(settings get secure enabled_accessibility_services); " +
+            "case \":\$c:\" in *\":$component:\"*) : ;; " +
+            "*) if [ \"\$c\" = \"null\" ] || [ -z \"\$c\" ]; then " +
+            "settings put secure enabled_accessibility_services '$component'; else " +
+            "settings put secure enabled_accessibility_services \"\$c:$component\"; fi ;; esac; " +
+            "settings put secure accessibility_enabled 1"
+        exec(mode, cmd)
+        return AutoSwitchService.isEnabled(context)
+    }
+
+    /** 关闭无障碍服务（Root / Shizuku）。 */
+    fun disableAccessibility(context: Context, mode: PrivilegeMode): Boolean {
+        if (mode == PrivilegeMode.ADB) return false
+        val component = ComponentName(context, AutoSwitchService::class.java).flattenToString()
+        val cmd = "c=\$(settings get secure enabled_accessibility_services); " +
+            "n=\$(echo \":\$c:\" | sed 's#:$component:##; s#^:##; s#:\$##'); " +
+            "settings put secure enabled_accessibility_services \"\$n\""
+        exec(mode, cmd)
+        return !AutoSwitchService.isEnabled(context)
     }
 
     private fun execRoot(command: String): String? = try {

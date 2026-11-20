@@ -49,8 +49,7 @@ class AutoSwitchService : AccessibilityService() {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val pkg = event.packageName?.toString() ?: return
                 if (pkg == packageName) return
-                val className = event.className?.toString().orEmpty()
-                if (className.contains("InputMethod")) return
+                if (pkg == "com.android.systemui") return
                 if (foregroundPackage == pkg) return
                 foregroundPackage = pkg
                 handleForegroundChange(pkg)
@@ -63,7 +62,7 @@ class AutoSwitchService : AccessibilityService() {
                     if (!source.isEditable) return
                     if (source.isPassword) return
                     if (ImeSwitcher.isOurImeActive(this)) return
-                    ImeSwitcher.switchToOurs(this)
+                    ImeSwitcher.trySwitchToOurs(this)
                 } finally {
                     @Suppress("DEPRECATION")
                     source.recycle()
@@ -75,7 +74,7 @@ class AutoSwitchService : AccessibilityService() {
     private fun handleForegroundChange(pkg: String) {
         val fixed = Prefs.getFixedApps(this)
         if (fixed.contains(pkg)) {
-            ImeSwitcher.switchToOurs(this)
+            ImeSwitcher.trySwitchToOurs(this)
         } else if (fixed.isNotEmpty() || Prefs.getRestoreIme(this) != null) {
             // 离开固定应用后切回原输入法
             ImeSwitcher.restorePrevious(this)
