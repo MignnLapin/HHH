@@ -25,7 +25,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenu
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -171,9 +170,16 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                             OutlinedButton(
                                 onClick = {
                                     if (Build.VERSION.SDK_INT >= 28) {
-                                        context.startActivity(
-                                            Intent(Settings.ACTION_SHOW_INPUT_METHOD_PICKER)
-                                        )
+                                        try {
+                                            val imm = context.getSystemService(
+                                                Context.INPUT_METHOD_SERVICE
+                                            ) as InputMethodManager
+                                            imm.showInputMethodPicker()
+                                        } catch (e: SecurityException) {
+                                            context.startActivity(
+                                                Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)
+                                            )
+                                        }
                                     } else {
                                         context.startActivity(
                                             Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)
