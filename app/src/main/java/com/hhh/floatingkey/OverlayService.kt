@@ -151,26 +151,25 @@ class OverlayService : Service() {
     private fun onPolled(pkg: String?, keyboardShown: Boolean) {
         if (!Prefs.isAutoSwitchEnabled(this)) return
         val fixed = Prefs.getFixedApps(this)
-        val imeActive = ImeSwitcher.isOurImeActive(this)
 
         if (pkg != null && pkg != packageName && pkg != lastPollPkg) {
             lastPollPkg = pkg
             AutoSwitchService.setForeground(pkg)
             when {
                 fixed.contains(pkg) -> ImeSwitcher.switchToOurs(this)
-                Prefs.getRestoreIme(this) != null -> ImeSwitcher.restorePrevious(this)
+                fixed.isNotEmpty() -> ImeSwitcher.restorePrevious(this)
             }
         }
 
         val foreground = pkg ?: AutoSwitchService.foregroundPackage
         val inFixedApp = foreground != null && fixed.contains(foreground)
+        // 配置了固定应用后，焦点切换只在固定应用内生效
+        val focusAllowed = fixed.isEmpty() || inFixedApp
 
-        if (keyboardShown && Prefs.isAutoSwitchOnFocus(this) && !imeActive) {
-            ImeSwitcher.switchToOurs(this)
-        } else if (!keyboardShown && imeActive && !inFixedApp &&
-            Prefs.getRestoreIme(this) != null
+        if (keyboardShown && Prefs.isAutoSwitchOnFocus(this) && focusAllowed &&
+            !ImeSwitcher.isOurImeActive(this)
         ) {
-            ImeSwitcher.restorePrevious(this)
+            ImeSwitcher.switchToOurs(this)
         }
     }
 

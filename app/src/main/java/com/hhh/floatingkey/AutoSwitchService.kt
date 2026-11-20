@@ -57,6 +57,12 @@ class AutoSwitchService : AccessibilityService() {
 
             AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
                 if (!Prefs.isAutoSwitchOnFocus(this)) return
+                // 配置了固定应用后，只在固定应用内响应输入框焦点，其他应用保持原输入法
+                val fixed = Prefs.getFixedApps(this)
+                if (fixed.isNotEmpty()) {
+                    val foreground = foregroundPackage ?: return
+                    if (!fixed.contains(foreground)) return
+                }
                 val source: AccessibilityNodeInfo = event.source ?: return
                 try {
                     if (!source.isEditable) return
@@ -75,8 +81,8 @@ class AutoSwitchService : AccessibilityService() {
         val fixed = Prefs.getFixedApps(this)
         if (fixed.contains(pkg)) {
             ImeSwitcher.trySwitchToOurs(this)
-        } else if (fixed.isNotEmpty() || Prefs.getRestoreIme(this) != null) {
-            // 离开固定应用后切回原输入法
+        } else if (fixed.isNotEmpty()) {
+            // 严格按前台应用判断：配置了固定应用时，不在列表里的前台应用一律切回原输入法
             ImeSwitcher.restorePrevious(this)
         }
     }

@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.ParcelFileDescriptor
+import android.provider.Settings
 import moe.shizuku.server.IShizukuService
 import rikka.shizuku.Shizuku
 import java.util.concurrent.TimeUnit
@@ -83,15 +84,40 @@ object PrivilegedShell {
         return AutoSwitchService.isEnabled(context)
     }
 
-    /** 关闭无障碍服务（Root / Shizuku）。 */
-    fun disableAccessibility(context: Context, mode: PrivilegeMode): Boolean {
-        if (mode == PrivilegeMode.ADB) return false
+    /**
+     * 始终自动开启无障碍服务：有 WRITE_SECURE_SETTINGS 时直接写系统设置，
+     * 否则用 Root / Shizuku 执行 shell，最后才退化为需要用户手动开启。
+     */
+    fun ensureAccessibility(context: Context): Boolean {
+        if (AutoSwitchService.isEnabled(context)) return true
+        if (ImeSwitcher.hasSecureSettings(context) && enableAccessibilityDirect(context)) {
+            return true
+        }
+        val mode = Prefs.getPrivilegeMode(context)
+        if (mode != PrivilegeMode.ADB) return enableAccessibility(context, mode)
+        return false
+    }
+
+    private fun enableAccessibilityDirect(context: Context): Boolean = try {
         val component = ComponentName(context, AutoSwitchService::class.java).flattenToString()
-        val cmd = "c=\$(settings get secure enabled_accessibility_services); " +
-            "n=\$(echo \":\$c:\" | sed 's#:$component:##; s#^:##; s#:\$##'); " +
-            "settings put secure enabled_accessibility_services \"\$n\""
-        exec(mode, cmd)
-        return !AutoSwitchService.isEnabled(context)
+        val resolver = context.contentResolver
+        val current = Settings.Secure.getString(
+            resolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: ""
+        val services = current.split(':').filter { it.isNotBlank() }.toMutableList()
+        if (services.none { it.equals(component, ignoreCase = true) }) {
+            services.add(component)
+        }
+        Settings.Secure.putString(
+            resolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+            services.joinToString(":")
+        )
+        Settings.Secure.putInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+        AutoSwitchService.isEnabled(context)
+    } catch (t: Throwable) {
+        false
     }
 
     private fun execRoot(command: String): String? = try {

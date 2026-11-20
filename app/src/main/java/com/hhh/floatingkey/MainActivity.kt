@@ -27,7 +27,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenuItem
@@ -41,7 +40,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -146,9 +144,10 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
     var rootReady by remember { mutableStateOf(PrivilegedShell.rootAvailable) }
     var shizukuReady by remember { mutableStateOf(PrivilegedShell.shizukuAvailable) }
     var autoUpdate by remember { mutableStateOf(Prefs.isAutoUpdate(context)) }
-    var updateInfo by remember { mutableStateOf<UpdateManager.Info?>(null) }
     var checking by remember { mutableStateOf(false) }
     var downloading by remember { mutableStateOf(false) }
+    var updateStatus by remember { mutableStateOf<String?>(null) }
+    var pendingApk by remember { mutableStateOf<java.io.File?>(null) }
 
     fun refreshStatuses() {
         overlayGranted = Settings.canDrawOverlays(context)
@@ -169,19 +168,71 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         autoUpdate = Prefs.isAutoUpdate(context)
     }
 
+    suspend fun runUpdate() {
+        checking = true
+        updateStatus = "正在检查更新…"
+        val info = UpdateManager.checkForUpdate(versionName(context))
+        checking = false
+        if (info == null) {
+            val error = UpdateManager.lastError
+            updateStatus = if (error != null) "检查更新失败：$error" else "已是最新版本"
+            return
+        }
+        downloading = true
+        updateStatus = "正在下载 v${info.version}…"
+        val file = UpdateManager.download(context, info.url)
+        downloading = false
+        if (file == null) {
+            updateStatus = "下载 v${info.version} 失败：${UpdateManager.lastError ?: "网络异常"}"
+            return
+        }
+        pendingApk = file
+        when (UpdateManager.install(context, file)) {
+            InstallResult.SILENT -> {
+                pendingApk = null
+                updateStatus = "已静默安装 v${info.version}"
+            }
+            InstallResult.OPENED -> {
+                pendingApk = null
+                updateStatus = "请在弹出的系统界面点击「安装」"
+            }
+            InstallResult.NEED_PERMISSION ->
+                updateStatus = "请允许「安装未知应用」，返回后自动继续"
+            InstallResult.FAILED ->
+                updateStatus = "安装 v${info.version} 失败：${UpdateManager.lastError ?: "未知原因"}"
+        }
+    }
+
     val pickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { refreshStatuses() }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) refreshStatuses()
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshStatuses()
+                // 从「安装未知应用」授权页返回后自动继续安装
+                val apk = pendingApk
+                if (apk != null && apk.exists() && context.packageManager.canRequestPackageInstalls()) {
+                    pendingApk = null
+                    UpdateManager.launchInstaller(context, apk)
+                    updateStatus = "请在弹出的系统界面点击「安装」"
+                }
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        if (Prefs.isAutoSwitchEnabled(context)) {
+                            PrivilegedShell.ensureAccessibility(context)
+                        }
+                    }
+                    accessibilityOn = AutoSwitchService.isEnabled(context)
+                }
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // 后台探测特权状态（Root/Shizuku 时顺带自动授予 WRITE_SECURE_SETTINGS），并按需自动检查更新
+    // 后台探测特权状态（Root/Shizuku 时自动授予 WRITE_SECURE_SETTINGS 并开启无障碍），并按需自动检查更新
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             PrivilegedShell.refreshRoot()
@@ -196,28 +247,13 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                         PrivilegedShell.grantSecureSettings(context, PrivilegeMode.SHIZUKU)
                 }
             }
+            if (Prefs.isAutoSwitchEnabled(context)) {
+                PrivilegedShell.ensureAccessibility(context)
+            }
         }
         refreshStatuses()
         if (Prefs.isAutoUpdate(context)) {
-            checking = true
-            val info = UpdateManager.checkForUpdate(versionName(context))
-            checking = false
-            if (info != null) {
-                // 自动下载并安装
-                downloading = true
-                val file = UpdateManager.download(context, info.url)
-                downloading = false
-                if (file != null) {
-                    val silent = UpdateManager.install(context, file)
-                    toast(
-                        context,
-                        if (silent) "正在静默安装 v${info.version}"
-                        else "已下载 v${info.version}，请完成安装"
-                    )
-                } else {
-                    updateInfo = info
-                }
-            }
+            runUpdate()
         }
     }
 
@@ -280,8 +316,8 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         !imeEnabled -> "「悬浮按键输入法」未在系统设置中启用，无法自动切换"
         !privilegedReady -> "缺少「${privilegeMode.label}」授权，无法写入系统输入法设置"
         !accessibilityOn && privilegeMode == PrivilegeMode.ADB ->
-            "ADB 模式需开启无障碍服务才能检测输入框"
-        !accessibilityOn -> "将由「${privilegeMode.label}」轮询检测前台应用（未开启无障碍）"
+            "无障碍未能自动开启，请点「去设置」手动开启"
+        !accessibilityOn -> "将由「${privilegeMode.label}」轮询检测前台应用（无障碍未开启）"
         else -> "自动切换已就绪"
     }
 
@@ -446,7 +482,7 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                     }
 
                     Text(
-                        "使用 Root / Shizuku 时可以关闭无障碍服务（应用会改用轮询检测）",
+                        "无障碍服务用于检测前台应用与输入框，开启后会一直保持",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -613,43 +649,13 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
 
                     StatusRow(
                         title = "无障碍服务",
-                        status = when {
-                            accessibilityOn -> "已开启"
-                            privilegeMode != PrivilegeMode.ADB && privilegedReady ->
-                                "未开启（将用 ${privilegeMode.label} 轮询检测）"
-                            else -> "未开启（ADB 模式必须开启）"
-                        },
-                        ok = accessibilityOn ||
-                            (privilegeMode != PrivilegeMode.ADB && privilegedReady)
+                        status = if (accessibilityOn) "已开启（自动）"
+                        else "未开启（缺少权限，请手动开启）",
+                        ok = accessibilityOn
                     ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (privilegeMode != PrivilegeMode.ADB && privilegedReady) {
-                                OutlinedButton(
-                                    onClick = {
-                                        scope.launch {
-                                            withContext(Dispatchers.IO) {
-                                                if (accessibilityOn) {
-                                                    PrivilegedShell.disableAccessibility(
-                                                        context, privilegeMode
-                                                    )
-                                                } else {
-                                                    PrivilegedShell.enableAccessibility(
-                                                        context, privilegeMode
-                                                    )
-                                                }
-                                            }
-                                            accessibilityOn = AutoSwitchService.isEnabled(context)
-                                            toast(
-                                                context,
-                                                if (accessibilityOn) "无障碍服务已开启"
-                                                else "无障碍服务已关闭"
-                                            )
-                                        }
-                                    }
-                                ) { Text(if (accessibilityOn) "自动关闭" else "自动开启") }
-                            }
+                        if (!accessibilityOn) {
                             OutlinedButton(onClick = { openAccessibilitySettings(context) }) {
-                                Text(if (accessibilityOn) "设置" else "去开启")
+                                Text("去设置")
                             }
                         }
                     }
@@ -669,6 +675,18 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                                 }
                                 toast(context, result.message)
                                 refreshStatuses()
+                                if (result == SwitchResult.OK) {
+                                    // 2 秒后自动切回，演示完整的「切过去 → 切回来」流程
+                                    delay(2000)
+                                    val restored = withContext(Dispatchers.IO) {
+                                        ImeSwitcher.restorePrevious(context)
+                                    }
+                                    toast(
+                                        context,
+                                        if (restored) "已切回原输入法" else "未能切回，请检查授权"
+                                    )
+                                    refreshStatuses()
+                                }
                             }
                         }
                     ) { Text("测试切换输入法") }
@@ -712,20 +730,28 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                             )
                         }
                         OutlinedButton(
-                            enabled = !checking,
+                            enabled = !checking && !downloading,
                             onClick = {
-                                scope.launch {
-                                    checking = true
-                                    val info = UpdateManager.checkForUpdate(versionName(context))
-                                    checking = false
-                                    if (info == null) {
-                                        toast(context, "已是最新版本")
-                                    } else {
-                                        updateInfo = info
-                                    }
-                                }
+                                scope.launch { runUpdate() }
                             }
-                        ) { Text(if (checking) "检查中…" else "检查更新") }
+                        ) {
+                            Text(
+                                when {
+                                    checking -> "检查中…"
+                                    downloading -> "下载中…"
+                                    else -> "检查并更新"
+                                }
+                            )
+                        }
+                    }
+                    val status = updateStatus
+                    if (status != null) {
+                        Text(
+                            status,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (status.contains("失败")) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.primary
+                        )
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -755,56 +781,6 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                 textAlign = TextAlign.Center
             )
         }
-    }
-
-    val info = updateInfo
-    if (info != null) {
-        AlertDialog(
-            onDismissRequest = { if (!downloading) updateInfo = null },
-            title = { Text("发现新版本 ${info.version}") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "当前版本 ${versionName(context)}，最新版本 ${info.version}",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    if (info.notes.isNotBlank()) {
-                        Text(
-                            info.notes.take(800),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = !downloading,
-                    onClick = {
-                        scope.launch {
-                            downloading = true
-                            val file = UpdateManager.download(context, info.url)
-                            downloading = false
-                            if (file == null) {
-                                toast(context, "下载失败，请稍后重试")
-                                return@launch
-                            }
-                            updateInfo = null
-                            val silent = UpdateManager.install(context, file)
-                            toast(
-                                context,
-                                if (silent) "正在静默安装更新" else "请在弹出的界面完成安装"
-                            )
-                        }
-                    }
-                ) { Text(if (downloading) "下载中…" else "立即更新") }
-            },
-            dismissButton = {
-                TextButton(enabled = !downloading, onClick = { updateInfo = null }) {
-                    Text("稍后")
-                }
-            }
-        )
     }
 }
 

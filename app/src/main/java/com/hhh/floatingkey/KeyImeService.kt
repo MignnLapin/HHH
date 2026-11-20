@@ -18,17 +18,30 @@ class KeyImeService : InputMethodService() {
             private set
 
         private const val NO_KEY = -1
+        private const val RESTORE_DELAY_MS = 500L
     }
 
     private var heldKeyCode = NO_KEY
     private val handler = Handler(Looper.getMainLooper())
+
+    /**
+     * 键盘收起 / 输入框失焦后切回原输入法。
+     * 不能用 currentInputConnection 判断：输入结束后该引用可能仍然保留，
+     * 这里改为等待键盘窗口真正隐藏（isInputViewShown == false）。
+     */
     private val restoreRunnable = Runnable {
+        val fixed = Prefs.getFixedApps(this)
         val foreground = AutoSwitchService.foregroundPackage
-        val stayInFixedApp = foreground != null &&
-            Prefs.getFixedApps(this).contains(foreground)
-        if (currentInputConnection == null && !stayInFixedApp) {
-            ImeSwitcher.restorePrevious(this)
-        }
+        val stayInFixedApp = foreground != null && fixed.contains(foreground)
+        if (stayInFixedApp) return@Runnable
+        if (isInputViewShown) return@Runnable
+        if (!Prefs.isAutoSwitchEnabled(this)) return@Runnable
+        ImeSwitcher.restorePrevious(this)
+    }
+
+    private fun scheduleRestore() {
+        handler.removeCallbacks(restoreRunnable)
+        handler.postDelayed(restoreRunnable, RESTORE_DELAY_MS)
     }
 
     override fun onCreate() {
@@ -70,8 +83,17 @@ class KeyImeService : InputMethodService() {
     override fun onFinishInput() {
         releaseHeldIfAny()
         super.onFinishInput()
-        handler.removeCallbacks(restoreRunnable)
-        handler.postDelayed(restoreRunnable, 400)
+        scheduleRestore()
+    }
+
+    override fun onFinishInputView(finishingInput: Boolean) {
+        super.onFinishInputView(finishingInput)
+        scheduleRestore()
+    }
+
+    override fun onWindowHidden() {
+        super.onWindowHidden()
+        scheduleRestore()
     }
 
     /** 单次按键：发送完整的按下 + 抬起。 */

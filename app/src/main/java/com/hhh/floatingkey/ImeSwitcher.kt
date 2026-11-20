@@ -59,8 +59,6 @@ object ImeSwitcher {
         )?.split(':')?.filter { it.isNotBlank() } ?: emptyList()
     }
 
-    private fun isImeEnabled(context: Context, imeId: String) = enabledImeIds(context).contains(imeId)
-
     /** 当前权限方式是否可用（会做一次阻塞探测）。 */
     fun canSwitch(context: Context): Boolean {
         if (hasSecureSettings(context)) return true
@@ -98,16 +96,18 @@ object ImeSwitcher {
     /** 恢复自动切换前的输入法。 */
     fun restorePrevious(context: Context): Boolean {
         if (!canSwitchCached(context) && !canSwitch(context)) return false
+        val ours = ourImeId(context)
         val current = currentImeId(context)
-        if (current != ourImeId(context)) {
+        if (current != ours) {
             Prefs.setRestoreIme(context, null)
             return true
         }
-        val previous = Prefs.getRestoreIme(context) ?: return false
-        if (previous == ourImeId(context) || !isImeEnabled(context, previous)) {
-            Prefs.setRestoreIme(context, null)
-            return false
-        }
+        val enabled = enabledImeIds(context)
+        val previous = Prefs.getRestoreIme(context)
+            ?.takeIf { it != ours && enabled.contains(it) }
+            // 记录丢失时从已启用的输入法里挑一个（优先最后一个）
+            ?: enabled.lastOrNull { it != ours }
+            ?: return false
         val ok = writeDefaultIme(context, previous)
         if (ok) Prefs.setRestoreIme(context, null)
         return ok
