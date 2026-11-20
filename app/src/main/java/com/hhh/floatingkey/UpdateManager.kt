@@ -2,7 +2,9 @@ package com.hhh.floatingkey
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.provider.Settings
 import androidx.core.content.FileProvider
@@ -34,6 +36,13 @@ object UpdateManager {
     private const val REPO = "MignnLapin/HHH"
     private const val API_LATEST = "https://api.github.com/repos/$REPO/releases/latest"
     private const val USER_AGENT = "FloatingKey"
+
+    /** GitHub 下载加速镜像，直连失败时依次尝试。 */
+    private val MIRRORS = listOf(
+        "https://ghproxy.net/",
+        "https://ghfast.top/",
+        "https://gh-proxy.com/"
+    )
 
     /** 最近一次失败原因，供界面展示。 */
     @Volatile
@@ -199,48 +208,105 @@ object UpdateManager {
 
     suspend fun download(context: Context, url: String): File? = withContext(Dispatchers.IO) {
         lastError = null
-        try {
-            val target = File(context.cacheDir, "update.apk")
-            if (target.exists()) target.delete()
-            var current = URL(url)
-            var connection: HttpURLConnection
-            var redirects = 0
-            while (true) {
-                connection = current.openConnection() as HttpURLConnection
-                connection.instanceFollowRedirects = false
-                connection.connectTimeout = 20000
-                connection.readTimeout = 30000
-                connection.setRequestProperty("User-Agent", USER_AGENT)
-                val code = connection.responseCode
-                if (code in 300..399) {
-                    val location = connection.getHeaderField("Location")
-                    connection.disconnect()
-                    if (location == null || ++redirects > 5) {
-                        lastError = "下载重定向失败"
-                        return@withContext null
-                    }
-                    current = URL(location)
-                    continue
-                }
-                if (code != 200) {
-                    connection.disconnect()
-                    lastError = "下载失败（HTTP $code）"
-                    return@withContext null
-                }
-                connection.inputStream.use { input ->
-                    target.outputStream().use { output -> input.copyTo(output) }
-                }
+        // GitHub Release 资产会跳转到 objects.githubusercontent.com，国内常被墙。
+        // 直连失败时依次尝试公开加速镜像。
+        val candidates = buildList {
+            add(url)
+            if (url.startsWith("https://github.com/")) {
+                MIRRORS.forEach { add(it + url) }
+            }
+        }
+        var message: String? = null
+        for (candidate in candidates) {
+            val target = try {
+                downloadOnce(context, candidate)
+            } catch (t: Throwable) {
+                message = t.message ?: t.javaClass.simpleName
+                null
+            }
+            if (target != null && verifyApk(context, target)) return@withContext target
+            if (target != null) {
+                message = "下载的安装包校验失败"
+                target.delete()
+            }
+        }
+        lastError = message ?: "网络异常"
+        null
+    }
+
+    private fun downloadOnce(context: Context, url: String): File? {
+        val target = File(context.cacheDir, "update.apk")
+        if (target.exists()) target.delete()
+        var current = URL(url)
+        var redirects = 0
+        while (true) {
+            val connection = current.openConnection() as HttpURLConnection
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = 20000
+            connection.readTimeout = 30000
+            connection.setRequestProperty("User-Agent", USER_AGENT)
+            val code = connection.responseCode
+            if (code in 300..399) {
+                val location = connection.getHeaderField("Location")
                 connection.disconnect()
-                break
+                if (location == null || ++redirects > 5) {
+                    lastError = "下载重定向失败"
+                    return null
+                }
+                current = URL(location)
+                continue
             }
-            if (target.length() <= 0L) {
-                lastError = "下载内容为空"
-                return@withContext null
+            if (code != 200) {
+                connection.disconnect()
+                lastError = "下载失败（HTTP $code）"
+                return null
             }
-            target
+            connection.inputStream.use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            }
+            connection.disconnect()
+            break
+        }
+        if (target.length() <= 0L) {
+            lastError = "下载内容为空"
+            return null
+        }
+        return target
+    }
+
+    /** 校验下载到的 APK 确实是本应用且版本更高，避免镜像返回错误页面。 */
+    private fun verifyApk(context: Context, file: File): Boolean {
+        return try {
+            if (file.length() <= 0L) return false
+            file.inputStream().use { input ->
+                val magic = ByteArray(2)
+                if (input.read(magic) != 2 || magic[0] != 'P'.code.toByte() ||
+                    magic[1] != 'K'.code.toByte()
+                ) {
+                    return false
+                }
+            }
+            val archive = context.packageManager.getPackageArchiveInfo(
+                file.absolutePath,
+                PackageManager.GET_SIGNING_CERTIFICATES
+            ) ?: return false
+            if (archive.packageName != context.packageName) return false
+            val newCode = if (Build.VERSION.SDK_INT >= 28) {
+                archive.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                archive.versionCode.toLong()
+            }
+            val installed = context.packageManager.getPackageInfo(context.packageName, 0)
+            val installedCode = if (Build.VERSION.SDK_INT >= 28) {
+                installed.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                installed.versionCode.toLong()
+            }
+            newCode > installedCode
         } catch (t: Throwable) {
-            lastError = t.message ?: t.javaClass.simpleName
-            null
+            false
         }
     }
 

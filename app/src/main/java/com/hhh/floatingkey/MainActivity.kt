@@ -168,7 +168,7 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         autoUpdate = Prefs.isAutoUpdate(context)
     }
 
-    suspend fun runUpdate() {
+    suspend fun runUpdate(notify: Boolean = false) {
         checking = true
         updateStatus = "正在检查更新…"
         val info = UpdateManager.checkForUpdate(versionName(context))
@@ -176,14 +176,19 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         if (info == null) {
             val error = UpdateManager.lastError
             updateStatus = if (error != null) "检查更新失败：$error" else "已是最新版本"
+            if (error != null) toast(context, "检查更新失败：$error")
+            else if (notify) toast(context, "已是最新版本")
             return
         }
         downloading = true
+        toast(context, "发现新版本 v${info.version}，正在下载…")
         updateStatus = "正在下载 v${info.version}…"
         val file = UpdateManager.download(context, info.url)
         downloading = false
         if (file == null) {
-            updateStatus = "下载 v${info.version} 失败：${UpdateManager.lastError ?: "网络异常"}"
+            val error = UpdateManager.lastError ?: "网络异常"
+            updateStatus = "下载 v${info.version} 失败：$error"
+            toast(context, "下载失败：$error")
             return
         }
         pendingApk = file
@@ -191,15 +196,22 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
             InstallResult.SILENT -> {
                 pendingApk = null
                 updateStatus = "已静默安装 v${info.version}"
+                toast(context, "已安装 v${info.version}")
             }
             InstallResult.OPENED -> {
                 pendingApk = null
                 updateStatus = "请在弹出的系统界面点击「安装」"
+                toast(context, "请在弹出的系统界面点击「安装」")
             }
-            InstallResult.NEED_PERMISSION ->
+            InstallResult.NEED_PERMISSION -> {
                 updateStatus = "请允许「安装未知应用」，返回后自动继续"
-            InstallResult.FAILED ->
-                updateStatus = "安装 v${info.version} 失败：${UpdateManager.lastError ?: "未知原因"}"
+                toast(context, "请允许「安装未知应用」，返回后自动继续")
+            }
+            InstallResult.FAILED -> {
+                val error = UpdateManager.lastError ?: "未知原因"
+                updateStatus = "安装 v${info.version} 失败：$error"
+                toast(context, "安装失败：$error")
+            }
         }
     }
 
@@ -256,7 +268,7 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         }
         refreshStatuses()
         if (Prefs.isAutoUpdate(context)) {
-            runUpdate()
+            runUpdate(notify = false)
         }
     }
 
@@ -735,7 +747,7 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                         OutlinedButton(
                             enabled = !checking && !downloading,
                             onClick = {
-                                scope.launch { runUpdate() }
+                                scope.launch { runUpdate(notify = true) }
                             }
                         ) {
                             Text(

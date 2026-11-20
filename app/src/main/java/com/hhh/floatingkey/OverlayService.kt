@@ -169,8 +169,16 @@ class OverlayService : Service() {
             lastPollPkg = pkg
             AutoSwitchService.setForeground(pkg)
             when {
-                fixed.contains(pkg) -> ImeSwitcher.switchToOurs(this)
-                fixed.isNotEmpty() -> ImeSwitcher.restorePrevious(this)
+                fixed.contains(pkg) -> {
+                    if (ImeSwitcher.switchToOurs(this)) {
+                        Toast.makeText(this, "已切换到悬浮按键输入法", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                fixed.isNotEmpty() && ImeSwitcher.isOurImeActive(this) -> {
+                    if (ImeSwitcher.restorePrevious(this)) {
+                        Toast.makeText(this, "已切回原输入法", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
         }
 
@@ -182,7 +190,9 @@ class OverlayService : Service() {
         if (keyboardShown && Prefs.isAutoSwitchOnFocus(this) && focusAllowed &&
             !ImeSwitcher.isOurImeActive(this)
         ) {
-            ImeSwitcher.switchToOurs(this)
+            if (ImeSwitcher.switchToOurs(this)) {
+                Toast.makeText(this, "已切换到悬浮按键输入法", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 

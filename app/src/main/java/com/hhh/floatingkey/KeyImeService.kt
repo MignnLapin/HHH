@@ -9,6 +9,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.widget.Toast
 
 class KeyImeService : InputMethodService() {
 
@@ -36,7 +37,10 @@ class KeyImeService : InputMethodService() {
         if (stayInFixedApp) return@Runnable
         if (isInputViewShown) return@Runnable
         if (!Prefs.isAutoSwitchEnabled(this)) return@Runnable
-        ImeSwitcher.restorePrevious(this)
+        if (!ImeSwitcher.isOurImeActive(this)) return@Runnable
+        if (ImeSwitcher.restorePrevious(this)) {
+            Toast.makeText(this, "已切回原输入法", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun scheduleRestore() {

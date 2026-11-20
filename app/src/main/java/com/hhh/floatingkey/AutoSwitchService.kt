@@ -73,7 +73,9 @@ class AutoSwitchService : AccessibilityService() {
                     if (!source.isEditable) return
                     if (source.isPassword) return
                     if (ImeSwitcher.isOurImeActive(this)) return
-                    ImeSwitcher.trySwitchToOurs(this)
+                    if (ImeSwitcher.trySwitchToOurs(this) == SwitchResult.OK) {
+                        Toast.makeText(this, "已切换到悬浮按键输入法", Toast.LENGTH_SHORT).show()
+                    }
                 } finally {
                     @Suppress("DEPRECATION")
                     source.recycle()
@@ -95,7 +97,9 @@ class AutoSwitchService : AccessibilityService() {
             }
         } else if (fixed.isNotEmpty()) {
             // 严格按前台应用判断：配置了固定应用时，不在列表里的前台应用一律切回原输入法
-            ImeSwitcher.restorePrevious(this)
+            if (ImeSwitcher.isOurImeActive(this) && ImeSwitcher.restorePrevious(this)) {
+                Toast.makeText(this, "已切回原输入法", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 }
