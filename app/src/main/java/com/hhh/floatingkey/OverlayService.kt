@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
@@ -49,6 +50,7 @@ class OverlayService : Service() {
 
     private lateinit var windowManager: WindowManager
     private var buttonView: TextView? = null
+    private var held = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -63,13 +65,22 @@ class OverlayService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_REFRESH) {
+            if (held) {
+                KeyImeService.instance?.releaseKey()
+                held = false
+            }
             buttonView?.text = Keys.buttonLabelFor(Prefs.getKeyCode(this))
+            updateButtonState()
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
         running = false
+        if (held) {
+            KeyImeService.instance?.releaseKey()
+            held = false
+        }
         buttonView?.let { windowManager.removeView(it) }
         buttonView = null
         super.onDestroy()
@@ -119,6 +130,7 @@ class OverlayService : Service() {
 
         windowManager.addView(view, params)
         buttonView = view
+        updateButtonState()
     }
 
     private fun makeDragListener(params: WindowManager.LayoutParams): View.OnTouchListener {
@@ -169,17 +181,37 @@ class OverlayService : Service() {
     private fun sendKey() {
         val keyCode = Prefs.getKeyCode(this)
         val ime = KeyImeService.instance
-        when {
-            ime == null -> Toast.makeText(
-                this,
-                "请先启用并选择「悬浮按键输入法」",
-                Toast.LENGTH_SHORT
-            ).show()
-            !ime.sendKey(keyCode) -> Toast.makeText(
-                this,
-                "没有输入焦点，请先点按输入框",
-                Toast.LENGTH_SHORT
-            ).show()
+        if (ime == null) {
+            Toast.makeText(this, "请先启用并选择「悬浮按键输入法」", Toast.LENGTH_SHORT).show()
+            return
         }
+
+        if (Prefs.isHoldMode(this)) {
+            if (!held) {
+                if (ime.pressKeyDown(keyCode)) {
+                    held = true
+                    updateButtonState()
+                } else {
+                    Toast.makeText(this, "没有输入焦点，请先点按输入框", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                ime.releaseKey()
+                held = false
+                updateButtonState()
+            }
+        } else {
+            if (!ime.sendKey(keyCode)) {
+                Toast.makeText(this, "没有输入焦点，请先点按输入框", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun updateButtonState() {
+        val view = buttonView ?: return
+        val normal = Color.parseColor("#6750A4")
+        val active = Color.parseColor("#B3261E")
+        view.backgroundTintList = ColorStateList.valueOf(if (held) active else normal)
+        val label = Keys.buttonLabelFor(Prefs.getKeyCode(this))
+        view.text = if (held) "$label •" else label
     }
 }

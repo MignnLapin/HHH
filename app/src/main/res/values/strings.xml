@@ -2,4 +2,5 @@
 <resources>
     <string name="app_name">悬浮按键</string>
     <string name="ime_label">悬浮按键输入法</string>
+    <string name="accessibility_desc">用于检测前台应用和输入框焦点，自动切换到「悬浮按键输入法」，离开后自动切回原输入法。不会读取或收集任何输入内容。</string>
 </resources>
