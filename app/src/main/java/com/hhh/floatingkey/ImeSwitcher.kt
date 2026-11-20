@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.inputmethod.InputMethodManager
 
@@ -44,6 +45,31 @@ object ImeSwitcher {
             PackageManager.PERMISSION_GRANTED
 
     fun isOurImeEnabled(context: Context): Boolean = enabledImeIds(context).contains(ourImeId(context))
+
+    @Volatile
+    private var imePackages: Set<String> = emptySet()
+
+    @Volatile
+    private var imePackagesAt = 0L
+
+    /**
+     * 是否是输入法自身的窗口包名。
+     * 切换默认输入法时，旧输入法的键盘窗口会关闭并抛出 TYPE_WINDOW_STATE_CHANGED，
+     * 如果不排除，会被误判成「切到了别的应用」从而立刻切回原输入法。
+     */
+    fun isImePackage(context: Context, pkg: String): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - imePackagesAt > 60_000) {
+            imePackages = try {
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.enabledInputMethodList.map { it.packageName }.toSet()
+            } catch (t: Throwable) {
+                emptySet()
+            }
+            imePackagesAt = now
+        }
+        return imePackages.contains(pkg)
+    }
 
     private fun enabledImeIds(context: Context): List<String> {
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager

@@ -51,6 +51,8 @@ class AutoSwitchService : AccessibilityService() {
                 val pkg = event.packageName?.toString() ?: return
                 if (pkg == packageName) return
                 if (pkg == "com.android.systemui") return
+                // 输入法键盘窗口会被系统当成前台窗口，必须排除，否则切换后立刻被误判为离开固定应用
+                if (ImeSwitcher.isImePackage(this, pkg)) return
                 if (foregroundPackage == pkg) return
                 // 走 setForeground，通知悬浮窗同步显示/隐藏（悬浮窗不受自动切换开关影响）
                 setForeground(pkg)

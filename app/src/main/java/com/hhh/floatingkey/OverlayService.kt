@@ -165,7 +165,9 @@ class OverlayService : Service() {
         if (!Prefs.isAutoSwitchEnabled(this)) return
         val fixed = Prefs.getFixedApps(this)
 
-        if (pkg != null && pkg != packageName && pkg != lastPollPkg) {
+        if (pkg != null && pkg != packageName && !ImeSwitcher.isImePackage(this, pkg) &&
+            pkg != lastPollPkg
+        ) {
             lastPollPkg = pkg
             AutoSwitchService.setForeground(pkg)
             when {
@@ -182,7 +184,10 @@ class OverlayService : Service() {
             }
         }
 
-        val foreground = pkg ?: AutoSwitchService.foregroundPackage
+        val effectivePkg = pkg?.takeIf {
+            it != packageName && !ImeSwitcher.isImePackage(this, it)
+        }
+        val foreground = effectivePkg ?: AutoSwitchService.foregroundPackage
         val inFixedApp = foreground != null && fixed.contains(foreground)
         // 配置了固定应用后，焦点切换只在固定应用内生效
         val focusAllowed = fixed.isEmpty() || inFixedApp
