@@ -205,7 +205,10 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
 
     val pickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
-    ) { refreshStatuses() }
+    ) {
+        refreshStatuses()
+        OverlayService.refresh(context)
+    }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->

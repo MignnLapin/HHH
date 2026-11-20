@@ -34,6 +34,15 @@ class OverlayService : Service() {
         var running = false
             private set
 
+        @Volatile
+        private var instance: OverlayService? = null
+
+        /** 前台应用变化时同步悬浮按钮的显示/隐藏。 */
+        fun onForegroundChanged(pkg: String?) {
+            val service = instance ?: return
+            service.mainHandler.post { service.applyVisibility(pkg) }
+        }
+
         fun start(context: Context) {
             context.startForegroundService(Intent(context, OverlayService::class.java))
         }
@@ -75,11 +84,13 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
         running = true
         addButton()
+        applyVisibility(AutoSwitchService.foregroundPackage)
         startPollingIfNeeded()
     }
 
@@ -91,6 +102,7 @@ class OverlayService : Service() {
             }
             buttonView?.text = Keys.buttonLabelFor(Prefs.getKeyCode(this))
             updateButtonState()
+            applyVisibility(AutoSwitchService.foregroundPackage)
             stopPolling()
             startPollingIfNeeded()
         }
@@ -99,6 +111,7 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         running = false
+        instance = null
         stopPolling()
         pollExecutor.shutdownNow()
         if (held) {
@@ -218,6 +231,30 @@ class OverlayService : Service() {
         windowManager.addView(view, params)
         buttonView = view
         updateButtonState()
+    }
+
+    private fun removeButton() {
+        val view = buttonView ?: return
+        if (held) {
+            KeyImeService.instance?.releaseKey()
+            held = false
+        }
+        try {
+            windowManager.removeView(view)
+        } catch (t: Throwable) {
+            // ignore
+        }
+        buttonView = null
+    }
+
+    /**
+     * 配置了固定应用时，悬浮按钮只在固定应用前台显示；
+     * 未配置固定应用或暂时拿不到前台信息时保持显示。
+     */
+    private fun applyVisibility(pkg: String?) {
+        val fixed = Prefs.getFixedApps(this)
+        val shouldShow = fixed.isEmpty() || pkg == null || fixed.contains(pkg)
+        if (shouldShow) addButton() else removeButton()
     }
 
     private fun makeDragListener(params: WindowManager.LayoutParams): View.OnTouchListener {

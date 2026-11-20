@@ -21,6 +21,7 @@ class AutoSwitchService : AccessibilityService() {
 
         fun setForeground(pkg: String?) {
             foregroundPackage = pkg
+            OverlayService.onForegroundChanged(pkg)
         }
 
         fun isEnabled(context: Context): Boolean {

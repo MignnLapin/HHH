@@ -33,6 +33,7 @@ object UpdateManager {
 
     private const val REPO = "MignnLapin/HHH"
     private const val API_LATEST = "https://api.github.com/repos/$REPO/releases/latest"
+    private const val USER_AGENT = "FloatingKey"
 
     /** 最近一次失败原因，供界面展示。 */
     @Volatile
@@ -43,13 +44,30 @@ object UpdateManager {
 
     suspend fun checkForUpdate(current: String): Info? = withContext(Dispatchers.IO) {
         lastError = null
+        val viaApi = checkViaApi(current)
+        if (viaApi != null) return@withContext viaApi
+        // API 正常但没有新版本
+        if (lastError == null) return@withContext null
+        // API 失败（常见为共享 IP 触发 GitHub 限流 403），改用 github.com 网页方式
+        val apiError = lastError
+        val viaWeb = checkViaWeb(current)
+        if (viaWeb != null) {
+            lastError = null
+            return@withContext viaWeb
+        }
+        lastError = "$apiError；备用检查失败：${lastError ?: "网络异常"}"
+        null
+    }
+
+    /** 官方 REST API：可能被共享出口 IP 的匿名限流拦成 403。 */
+    private fun checkViaApi(current: String): Info? {
         var attempt = 0
         while (attempt < 2) {
             attempt++
             try {
                 val connection = URL(API_LATEST).openConnection() as HttpURLConnection
                 connection.setRequestProperty("Accept", "application/vnd.github+json")
-                connection.setRequestProperty("User-Agent", "FloatingKey")
+                connection.setRequestProperty("User-Agent", USER_AGENT)
                 connection.connectTimeout = 15000
                 connection.readTimeout = 20000
                 val code = connection.responseCode
@@ -60,17 +78,16 @@ object UpdateManager {
                 }
                 connection.disconnect()
                 if (code !in 200..299) {
-                    lastError = if (code == 403) "GitHub 访问受限（HTTP 403）" else "HTTP $code"
-                    if (code == 403 || code == 404) return@withContext null
-                    continue
+                    lastError = if (code == 403) "GitHub API 访问受限（HTTP 403）" else "HTTP $code"
+                    return null
                 }
                 val json = JSONObject(body)
                 val version = json.optString("tag_name").removePrefix("v").trim()
                 if (version.isEmpty()) {
                     lastError = "发布信息缺少版本号"
-                    return@withContext null
+                    return null
                 }
-                if (compareVersion(version, current) <= 0) return@withContext null
+                if (compareVersion(version, current) <= 0) return null
                 val assets = json.optJSONArray("assets")
                 var url = ""
                 if (assets != null) {
@@ -84,13 +101,87 @@ object UpdateManager {
                 }
                 if (url.isEmpty()) {
                     lastError = "该版本没有可下载的 APK"
-                    return@withContext null
+                    return null
                 }
-                return@withContext Info(version, url, json.optString("body"))
+                return Info(version, url, json.optString("body"))
             } catch (t: Throwable) {
                 lastError = t.message ?: t.javaClass.simpleName
             }
         }
+        return null
+    }
+
+    /** 不走 API：通过 releases/latest 重定向或 atom 订阅拿到最新版本号。 */
+    private fun checkViaWeb(current: String): Info? {
+        var tag = latestTagFromRedirect()
+        if (tag == null) tag = latestTagFromAtom()
+        if (tag == null) return null
+        val version = tag.removePrefix("v").trim()
+        if (version.isEmpty()) return null
+        if (compareVersion(version, current) <= 0) return null
+        val url = findApkUrl(tag, version)
+        return Info(version, url, "")
+    }
+
+    private fun latestTagFromRedirect(): String? = try {
+        val connection = URL("https://github.com/$REPO/releases/latest")
+            .openConnection() as HttpURLConnection
+        connection.instanceFollowRedirects = false
+        connection.connectTimeout = 15000
+        connection.readTimeout = 20000
+        connection.setRequestProperty("User-Agent", USER_AGENT)
+        val code = connection.responseCode
+        val location = connection.getHeaderField("Location")
+        connection.disconnect()
+        if (code in 300..399 && location != null) {
+            location.substringAfter("/releases/tag/", "")
+                .trim('/')
+                .takeIf { it.isNotEmpty() }
+        } else {
+            null
+        }
+    } catch (t: Throwable) {
+        null
+    }
+
+    private fun latestTagFromAtom(): String? {
+        return try {
+            val body = httpGet("https://github.com/$REPO/releases.atom") ?: return null
+            Regex("/releases/tag/([^\"<>/]+)").find(body)?.groupValues?.get(1)?.trim()
+                ?.takeIf { it.isNotEmpty() }
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    private fun findApkUrl(tag: String, version: String): String {
+        // expanded_assets 是公开页面，不受 API 限流影响
+        val html = httpGet("https://github.com/$REPO/releases/expanded_assets/$tag")
+        if (html != null) {
+            Regex("href=\"([^\"]+\\.apk)\"", RegexOption.IGNORE_CASE)
+                .find(html)?.groupValues?.get(1)?.let { href ->
+                    return if (href.startsWith("http")) href else "https://github.com$href"
+                }
+        }
+        // 约定命名兜底：FloatingKey-<版本>.apk
+        return "https://github.com/$REPO/releases/download/$tag/FloatingKey-$version.apk"
+    }
+
+    private fun httpGet(url: String): String? = try {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        connection.instanceFollowRedirects = true
+        connection.connectTimeout = 15000
+        connection.readTimeout = 20000
+        connection.setRequestProperty("User-Agent", USER_AGENT)
+        val code = connection.responseCode
+        if (code !in 200..299) {
+            connection.disconnect()
+            null
+        } else {
+            connection.inputStream.bufferedReader().use { it.readText() }
+                .also { connection.disconnect() }
+        }
+    } catch (t: Throwable) {
         null
     }
 
@@ -119,7 +210,7 @@ object UpdateManager {
                 connection.instanceFollowRedirects = false
                 connection.connectTimeout = 20000
                 connection.readTimeout = 30000
-                connection.setRequestProperty("User-Agent", "FloatingKey")
+                connection.setRequestProperty("User-Agent", USER_AGENT)
                 val code = connection.responseCode
                 if (code in 300..399) {
                     val location = connection.getHeaderField("Location")
