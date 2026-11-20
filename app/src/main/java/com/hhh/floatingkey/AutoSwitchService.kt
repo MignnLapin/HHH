@@ -6,6 +6,7 @@ import android.content.Context
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Toast
 
 /**
  * 监听前台应用与输入框焦点，自动切换输入法：
@@ -44,7 +45,6 @@ class AutoSwitchService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        if (!Prefs.isAutoSwitchEnabled(this)) return
 
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
@@ -52,11 +52,15 @@ class AutoSwitchService : AccessibilityService() {
                 if (pkg == packageName) return
                 if (pkg == "com.android.systemui") return
                 if (foregroundPackage == pkg) return
-                foregroundPackage = pkg
-                handleForegroundChange(pkg)
+                // 走 setForeground，通知悬浮窗同步显示/隐藏（悬浮窗不受自动切换开关影响）
+                setForeground(pkg)
+                if (Prefs.isAutoSwitchEnabled(this)) {
+                    handleForegroundChange(pkg)
+                }
             }
 
             AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
+                if (!Prefs.isAutoSwitchEnabled(this)) return
                 if (!Prefs.isAutoSwitchOnFocus(this)) return
                 // 配置了固定应用后，只在固定应用内响应输入框焦点，其他应用保持原输入法
                 val fixed = Prefs.getFixedApps(this)
@@ -81,7 +85,14 @@ class AutoSwitchService : AccessibilityService() {
     private fun handleForegroundChange(pkg: String) {
         val fixed = Prefs.getFixedApps(this)
         if (fixed.contains(pkg)) {
-            ImeSwitcher.trySwitchToOurs(this)
+            val wasActive = ImeSwitcher.isOurImeActive(this)
+            val result = ImeSwitcher.trySwitchToOurs(this)
+            when {
+                result == SwitchResult.OK && !wasActive ->
+                    Toast.makeText(this, "已切换到悬浮按键输入法", Toast.LENGTH_SHORT).show()
+                result != SwitchResult.OK ->
+                    Toast.makeText(this, "切换输入法失败：${result.message}", Toast.LENGTH_LONG).show()
+            }
         } else if (fixed.isNotEmpty()) {
             // 严格按前台应用判断：配置了固定应用时，不在列表里的前台应用一律切回原输入法
             ImeSwitcher.restorePrevious(this)
