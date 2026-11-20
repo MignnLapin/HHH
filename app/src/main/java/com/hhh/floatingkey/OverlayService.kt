@@ -9,7 +9,9 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -18,6 +20,7 @@ import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import java.util.concurrent.Executors
 import kotlin.math.abs
 
 class OverlayService : Service() {
@@ -52,6 +55,22 @@ class OverlayService : Service() {
     private var buttonView: TextView? = null
     private var held = false
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val pollExecutor = Executors.newSingleThreadExecutor()
+    private var polling = false
+    private var lastPollPkg: String? = null
+
+    private val pollRunnable = object : Runnable {
+        override fun run() {
+            if (!shouldPoll()) {
+                polling = false
+                return
+            }
+            pollOnce()
+            mainHandler.postDelayed(this, 1200)
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -61,6 +80,7 @@ class OverlayService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification())
         running = true
         addButton()
+        startPollingIfNeeded()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -71,12 +91,16 @@ class OverlayService : Service() {
             }
             buttonView?.text = Keys.buttonLabelFor(Prefs.getKeyCode(this))
             updateButtonState()
+            stopPolling()
+            startPollingIfNeeded()
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
         running = false
+        stopPolling()
+        pollExecutor.shutdownNow()
         if (held) {
             KeyImeService.instance?.releaseKey()
             held = false
@@ -84,6 +108,70 @@ class OverlayService : Service() {
         buttonView?.let { windowManager.removeView(it) }
         buttonView = null
         super.onDestroy()
+    }
+
+    /**
+     * Root / Shizuku 模式下若未开启无障碍，则通过轮询 dumpsys 检测前台应用与键盘状态。
+     */
+    private fun shouldPoll(): Boolean =
+        Prefs.isAutoSwitchEnabled(this) &&
+            Prefs.getPrivilegeMode(this) != PrivilegeMode.ADB &&
+            !AutoSwitchService.isEnabled(this)
+
+    private fun startPollingIfNeeded() {
+        if (polling || !shouldPoll()) return
+        polling = true
+        mainHandler.post(pollRunnable)
+    }
+
+    private fun stopPolling() {
+        polling = false
+        mainHandler.removeCallbacks(pollRunnable)
+    }
+
+    private fun pollOnce() {
+        val mode = Prefs.getPrivilegeMode(this)
+        pollExecutor.execute {
+            val windowDump = PrivilegedShell.exec(
+                mode,
+                "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"
+            )
+            val imeDump = PrivilegedShell.exec(
+                mode,
+                "dumpsys input_method | grep -m1 'mInputShown='"
+            )
+            val pkg = windowDump?.let {
+                Regex("(?:u0\\s+)?([A-Za-z0-9._]+)/").find(it)?.groupValues?.get(1)
+            }
+            val keyboardShown = imeDump?.contains("mInputShown=true") == true
+            mainHandler.post { onPolled(pkg, keyboardShown) }
+        }
+    }
+
+    private fun onPolled(pkg: String?, keyboardShown: Boolean) {
+        if (!Prefs.isAutoSwitchEnabled(this)) return
+        val fixed = Prefs.getFixedApps(this)
+        val imeActive = ImeSwitcher.isOurImeActive(this)
+
+        if (pkg != null && pkg != packageName && pkg != lastPollPkg) {
+            lastPollPkg = pkg
+            AutoSwitchService.setForeground(pkg)
+            when {
+                fixed.contains(pkg) -> ImeSwitcher.switchToOurs(this)
+                Prefs.getRestoreIme(this) != null -> ImeSwitcher.restorePrevious(this)
+            }
+        }
+
+        val foreground = pkg ?: AutoSwitchService.foregroundPackage
+        val inFixedApp = foreground != null && fixed.contains(foreground)
+
+        if (keyboardShown && Prefs.isAutoSwitchOnFocus(this) && !imeActive) {
+            ImeSwitcher.switchToOurs(this)
+        } else if (!keyboardShown && imeActive && !inFixedApp &&
+            Prefs.getRestoreIme(this) != null
+        ) {
+            ImeSwitcher.restorePrevious(this)
+        }
     }
 
     private fun createNotificationChannel() {

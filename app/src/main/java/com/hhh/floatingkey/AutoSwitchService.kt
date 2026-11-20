@@ -19,6 +19,10 @@ class AutoSwitchService : AccessibilityService() {
         var foregroundPackage: String? = null
             private set
 
+        fun setForeground(pkg: String?) {
+            foregroundPackage = pkg
+        }
+
         fun isEnabled(context: Context): Boolean {
             val expected = ComponentName(context, AutoSwitchService::class.java)
                 .flattenToString()

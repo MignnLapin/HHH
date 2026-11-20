@@ -13,6 +13,8 @@ object Prefs {
     private const val KEY_AUTO_SWITCH_FOCUS = "auto_switch_focus"
     private const val KEY_FIXED_APPS = "fixed_apps"
     private const val KEY_RESTORE_IME = "restore_ime"
+    private const val KEY_PRIVILEGE_MODE = "privilege_mode"
+    private const val KEY_AUTO_UPDATE = "auto_update"
 
     private fun sp(context: Context) =
         context.getSharedPreferences(FILE_NAME, Context.MODE_PRIVATE)
@@ -33,7 +35,7 @@ object Prefs {
     }
 
     fun isAutoSwitchEnabled(context: Context): Boolean =
-        sp(context).getBoolean(KEY_AUTO_SWITCH, false)
+        sp(context).getBoolean(KEY_AUTO_SWITCH, true)
 
     fun setAutoSwitchEnabled(context: Context, value: Boolean) {
         sp(context).edit().putBoolean(KEY_AUTO_SWITCH, value).apply()
@@ -59,5 +61,19 @@ object Prefs {
 
     fun setRestoreIme(context: Context, imeId: String?) {
         sp(context).edit().putString(KEY_RESTORE_IME, imeId).apply()
+    }
+
+    fun getPrivilegeMode(context: Context): PrivilegeMode =
+        PrivilegeMode.fromKey(sp(context).getString(KEY_PRIVILEGE_MODE, null))
+
+    fun setPrivilegeMode(context: Context, mode: PrivilegeMode) {
+        sp(context).edit().putString(KEY_PRIVILEGE_MODE, mode.key).apply()
+    }
+
+    fun isAutoUpdate(context: Context): Boolean =
+        sp(context).getBoolean(KEY_AUTO_UPDATE, true)
+
+    fun setAutoUpdate(context: Context, value: Boolean) {
+        sp(context).edit().putBoolean(KEY_AUTO_UPDATE, value).apply()
     }
 }

@@ -12,8 +12,8 @@ android {
         applicationId = "com.hhh.floatingkey"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     buildTypes {
@@ -45,4 +45,8 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:aidl:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 }

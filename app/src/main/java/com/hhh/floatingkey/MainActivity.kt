@@ -1,27 +1,25 @@
 package com.hhh.floatingkey
 
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.inputmethod.InputMethodManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -40,15 +38,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,24 +56,35 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import rikka.shizuku.Shizuku
 
 class MainActivity : ComponentActivity() {
 
-    private val requestNotificationPermission =
+    private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
+    private var shizukuListener: Shizuku.OnRequestPermissionResultListener? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            val context = LocalContext.current
-            val darkTheme = isSystemInDarkTheme()
-            val colorScheme = when {
-                Build.VERSION.SDK_INT >= 31 && darkTheme -> dynamicDarkColorScheme(context)
-                Build.VERSION.SDK_INT >= 31 -> dynamicLightColorScheme(context)
-                darkTheme -> darkColorScheme()
-                else -> lightColorScheme()
+        try {
+            val listener = Shizuku.OnRequestPermissionResultListener { _, result ->
+                if (result == PackageManager.PERMISSION_GRANTED) {
+                    PrivilegedShell.refreshShizuku()
+                }
             }
-            MaterialTheme(colorScheme = colorScheme) {
+            Shizuku.addRequestPermissionResultListener(listener)
+            shizukuListener = listener
+        } catch (t: Throwable) {
+            // Shizuku 未安装或未运行
+        }
+
+        setContent {
+            FloatingKeyTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
@@ -85,7 +92,7 @@ class MainActivity : ComponentActivity() {
                     MainScreen(
                         onRequestNotificationPermission = {
                             if (Build.VERSION.SDK_INT >= 33) {
-                                requestNotificationPermission.launch(
+                                notificationPermission.launch(
                                     android.Manifest.permission.POST_NOTIFICATIONS
                                 )
                             }
@@ -95,12 +102,24 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onDestroy() {
+        shizukuListener?.let { listener ->
+            try {
+                Shizuku.removeRequestPermissionResultListener(listener)
+            } catch (t: Throwable) {
+                // ignore
+            }
+        }
+        super.onDestroy()
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
     val clipboard = LocalClipboardManager.current
 
@@ -110,14 +129,19 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
     var buttonVisible by remember { mutableStateOf(OverlayService.running) }
     var selectedKey by remember { mutableStateOf(Prefs.getKeyCode(context)) }
     var keyMenuExpanded by remember { mutableStateOf(false) }
-
     var holdMode by remember { mutableStateOf(Prefs.isHoldMode(context)) }
     var autoSwitch by remember { mutableStateOf(Prefs.isAutoSwitchEnabled(context)) }
     var autoFocus by remember { mutableStateOf(Prefs.isAutoSwitchOnFocus(context)) }
     var fixedApps by remember { mutableStateOf(Prefs.getFixedApps(context)) }
     var accessibilityOn by remember { mutableStateOf(AutoSwitchService.isEnabled(context)) }
-    var secureGranted by remember { mutableStateOf(ImeSwitcher.canSwitch(context)) }
-    var showAppPicker by remember { mutableStateOf(false) }
+    var privilegeMode by remember { mutableStateOf(Prefs.getPrivilegeMode(context)) }
+    var privilegedReady by remember { mutableStateOf(ImeSwitcher.canSwitchCached(context)) }
+    var rootReady by remember { mutableStateOf(PrivilegedShell.rootAvailable) }
+    var shizukuReady by remember { mutableStateOf(PrivilegedShell.shizukuAvailable) }
+    var autoUpdate by remember { mutableStateOf(Prefs.isAutoUpdate(context)) }
+    var updateInfo by remember { mutableStateOf<UpdateManager.Info?>(null) }
+    var checking by remember { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
 
     fun refreshStatuses() {
         overlayGranted = Settings.canDrawOverlays(context)
@@ -127,12 +151,20 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         imeSelected = ImeSwitcher.currentImeId(context) == ourId
         buttonVisible = OverlayService.running
         accessibilityOn = AutoSwitchService.isEnabled(context)
-        secureGranted = ImeSwitcher.canSwitch(context)
+        privilegeMode = Prefs.getPrivilegeMode(context)
+        privilegedReady = ImeSwitcher.canSwitchCached(context)
+        rootReady = PrivilegedShell.rootAvailable
+        shizukuReady = PrivilegedShell.shizukuAvailable
         holdMode = Prefs.isHoldMode(context)
         autoSwitch = Prefs.isAutoSwitchEnabled(context)
         autoFocus = Prefs.isAutoSwitchOnFocus(context)
         fixedApps = Prefs.getFixedApps(context)
+        autoUpdate = Prefs.isAutoUpdate(context)
     }
+
+    val pickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { refreshStatuses() }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -140,6 +172,29 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // 后台探测特权状态，并按需自动检查更新
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            PrivilegedShell.refreshRoot()
+            PrivilegedShell.refreshShizuku()
+        }
+        refreshStatuses()
+        if (Prefs.isAutoUpdate(context)) {
+            checking = true
+            val info = UpdateManager.checkForUpdate(versionName(context))
+            checking = false
+            if (info != null) updateInfo = info
+        }
+    }
+
+    // 状态自动刷新（输入法启用/选中状态等）
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(2000)
+            refreshStatuses()
+        }
     }
 
     Scaffold(
@@ -188,27 +243,117 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                                 }
                             ) { Text("启用") }
                             OutlinedButton(
-                                onClick = {
-                                    if (Build.VERSION.SDK_INT >= 28) {
-                                        try {
-                                            val imm = context.getSystemService(
-                                                Context.INPUT_METHOD_SERVICE
-                                            ) as InputMethodManager
-                                            imm.showInputMethodPicker()
-                                        } catch (e: SecurityException) {
-                                            context.startActivity(
-                                                Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)
-                                            )
-                                        }
-                                    } else {
-                                        context.startActivity(
-                                            Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)
-                                        )
-                                    }
-                                }
+                                onClick = { showImePicker(context) }
                             ) { Text("切换") }
                         }
                     }
+                }
+            }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text("权限方式", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "用于自动切换输入法与静默安装更新",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PrivilegeMode.values().forEach { mode ->
+                            FilterChip(
+                                selected = privilegeMode == mode,
+                                onClick = {
+                                    privilegeMode = mode
+                                    Prefs.setPrivilegeMode(context, mode)
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            when (mode) {
+                                                PrivilegeMode.ROOT -> PrivilegedShell.refreshRoot()
+                                                PrivilegeMode.SHIZUKU -> PrivilegedShell.refreshShizuku()
+                                                PrivilegeMode.ADB -> Unit
+                                            }
+                                        }
+                                        privilegedReady = ImeSwitcher.canSwitchCached(context)
+                                        rootReady = PrivilegedShell.rootAvailable
+                                        shizukuReady = PrivilegedShell.shizukuAvailable
+                                        OverlayService.refresh(context)
+                                    }
+                                },
+                                label = { Text(mode.label) }
+                            )
+                        }
+                    }
+
+                    when (privilegeMode) {
+                        PrivilegeMode.ADB -> StatusRow(
+                            title = "ADB 授权",
+                            status = if (privilegedReady) "已授权" else "未授权（需 adb 授权一次）",
+                            ok = privilegedReady
+                        ) {
+                            if (!privilegedReady) {
+                                OutlinedButton(
+                                    onClick = {
+                                        clipboard.setText(AnnotatedString(ImeSwitcher.GRANT_COMMAND))
+                                        toast(context, "已复制，请连接电脑执行")
+                                    }
+                                ) { Text("复制命令") }
+                            }
+                        }
+
+                        PrivilegeMode.ROOT -> StatusRow(
+                            title = "Root 权限",
+                            status = if (rootReady) "已获取" else "未获取",
+                            ok = rootReady
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        val ok = withContext(Dispatchers.IO) {
+                                            PrivilegedShell.refreshRoot()
+                                        }
+                                        rootReady = ok
+                                        privilegedReady = ImeSwitcher.canSwitchCached(context)
+                                        toast(context, if (ok) "Root 已就绪" else "未获取到 Root")
+                                        OverlayService.refresh(context)
+                                    }
+                                }
+                            ) { Text("检测") }
+                        }
+
+                        PrivilegeMode.SHIZUKU -> StatusRow(
+                            title = "Shizuku",
+                            status = when {
+                                shizukuReady -> "已连接并授权"
+                                PrivilegedShell.isShizukuInstalled() -> "已运行 · 未授权"
+                                else -> "未运行"
+                            },
+                            ok = shizukuReady
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        val granted = requestShizuku(context)
+                                        if (granted) {
+                                            PrivilegedShell.refreshShizuku()
+                                            shizukuReady = PrivilegedShell.shizukuAvailable
+                                            privilegedReady = ImeSwitcher.canSwitchCached(context)
+                                            toast(context, "Shizuku 已授权")
+                                            OverlayService.refresh(context)
+                                        }
+                                    }
+                                }
+                            ) { Text("授权") }
+                        }
+                    }
+
+                    Text(
+                        "使用 Root / Shizuku 时可以关闭无障碍服务（应用会改用轮询检测）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
@@ -342,6 +487,7 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                             onCheckedChange = {
                                 autoSwitch = it
                                 Prefs.setAutoSwitchEnabled(context, it)
+                                OverlayService.refresh(context)
                             }
                         )
                     }
@@ -364,31 +510,23 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                             onCheckedChange = {
                                 autoFocus = it
                                 Prefs.setAutoSwitchOnFocus(context, it)
+                                OverlayService.refresh(context)
                             }
                         )
                     }
 
                     StatusRow(
                         title = "无障碍服务",
-                        status = if (accessibilityOn) "已开启" else "未开启（用于识别应用与输入框）",
-                        ok = accessibilityOn
+                        status = when {
+                            accessibilityOn -> "已开启"
+                            privilegeMode != PrivilegeMode.ADB && privilegedReady ->
+                                "未开启（将使用$privilegeMode 轮询）"
+                            else -> "未开启（ADB 模式需要开启）"
+                        },
+                        ok = accessibilityOn || (privilegeMode != PrivilegeMode.ADB && privilegedReady)
                     ) {
                         OutlinedButton(onClick = { openAccessibilitySettings(context) }) {
                             Text(if (accessibilityOn) "设置" else "去开启")
-                        }
-                    }
-
-                    StatusRow(
-                        title = "切换权限",
-                        status = if (secureGranted) "已授权" else "未授权（需 adb 授权一次）",
-                        ok = secureGranted
-                    ) {
-                        if (!secureGranted) {
-                            OutlinedButton(
-                                onClick = {
-                                    clipboard.setText(AnnotatedString(ImeSwitcher.GRANT_COMMAND))
-                                }
-                            ) { Text("复制命令") }
                         }
                     }
 
@@ -405,9 +543,63 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        OutlinedButton(onClick = { showAppPicker = true }) {
-                            Text("选择应用")
+                        OutlinedButton(
+                            onClick = {
+                                pickerLauncher.launch(
+                                    Intent(context, AppPickerActivity::class.java)
+                                )
+                            }
+                        ) { Text("选择应用") }
+                    }
+                }
+            }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("版本 ${versionName(context)}", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "从 GitHub 发布页检查更新",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
+                        OutlinedButton(
+                            enabled = !checking,
+                            onClick = {
+                                scope.launch {
+                                    checking = true
+                                    val info = UpdateManager.checkForUpdate(versionName(context))
+                                    checking = false
+                                    if (info == null) {
+                                        toast(context, "已是最新版本")
+                                    } else {
+                                        updateInfo = info
+                                    }
+                                }
+                            }
+                        ) { Text(if (checking) "检查中…" else "检查更新") }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("自动更新", style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "启动时自动检查，发现新版本自动下载",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = autoUpdate,
+                            onCheckedChange = {
+                                autoUpdate = it
+                                Prefs.setAutoUpdate(context, it)
+                            }
+                        )
                     }
                 }
             }
@@ -422,76 +614,55 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         }
     }
 
-    if (showAppPicker) {
-        AppPickerDialog(
-            selected = fixedApps,
-            onDismiss = { showAppPicker = false },
-            onConfirm = { newSelection ->
-                fixedApps = newSelection
-                Prefs.setFixedApps(context, newSelection)
-                showAppPicker = false
-            }
-        )
-    }
-}
-
-private data class InstalledApp(val label: String, val pkg: String)
-
-@Composable
-private fun AppPickerDialog(
-    selected: Set<String>,
-    onDismiss: () -> Unit,
-    onConfirm: (Set<String>) -> Unit
-) {
-    val context = LocalContext.current
-    val apps = remember { loadLauncherApps(context) }
-    val current = remember { mutableStateOf(selected) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("选择固定应用") },
-        text = {
-            if (apps.isEmpty()) {
-                Text("未找到可启动的应用")
-            } else {
-                LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
-                    items(apps, key = { it.pkg }) { app ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(app.label, style = MaterialTheme.typography.bodyLarge)
-                                Text(
-                                    app.pkg,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+    val info = updateInfo
+    if (info != null) {
+        AlertDialog(
+            onDismissRequest = { if (!downloading) updateInfo = null },
+            title = { Text("发现新版本 ${info.version}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "当前版本 ${versionName(context)}，最新版本 ${info.version}",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    if (info.notes.isNotBlank()) {
+                        Text(
+                            info.notes.take(800),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !downloading,
+                    onClick = {
+                        scope.launch {
+                            downloading = true
+                            val file = UpdateManager.download(context, info.url)
+                            downloading = false
+                            if (file == null) {
+                                toast(context, "下载失败，请稍后重试")
+                                return@launch
                             }
-                            Switch(
-                                checked = current.value.contains(app.pkg),
-                                onCheckedChange = { checked ->
-                                    current.value = if (checked) {
-                                        current.value + app.pkg
-                                    } else {
-                                        current.value - app.pkg
-                                    }
-                                }
+                            updateInfo = null
+                            val silent = UpdateManager.install(context, file)
+                            toast(
+                                context,
+                                if (silent) "正在静默安装更新" else "请在弹出的界面完成安装"
                             )
                         }
                     }
+                ) { Text(if (downloading) "下载中…" else "立即更新") }
+            },
+            dismissButton = {
+                TextButton(enabled = !downloading, onClick = { updateInfo = null }) {
+                    Text("稍后")
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(current.value) }) { Text("确定") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
-        }
-    )
+        )
+    }
 }
 
 @Composable
@@ -534,17 +705,43 @@ private fun openAccessibilitySettings(context: Context) {
     context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
 }
 
-private fun loadLauncherApps(context: Context): List<InstalledApp> {
-    val pm = context.packageManager
-    val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-    return pm.queryIntentActivities(intent, 0)
-        .mapNotNull { info ->
-            val pkg = info.activityInfo?.packageName ?: return@mapNotNull null
-            InstalledApp(info.loadLabel(pm).toString(), pkg)
+private fun showImePicker(context: Context) {
+    if (Build.VERSION.SDK_INT >= 28) {
+        try {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showInputMethodPicker()
+            return
+        } catch (e: SecurityException) {
+            // fall through
         }
-        .filter { it.pkg != context.packageName }
-        .distinctBy { it.pkg }
-        .sortedBy { it.label.lowercase() }
+    }
+    context.startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+}
+
+/** 请求 Shizuku 授权，返回是否已获得权限。 */
+private fun requestShizuku(context: Context): Boolean {
+    return try {
+        if (!Shizuku.pingBinder()) {
+            toast(context, "请先安装并启动 Shizuku")
+            return false
+        }
+        if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
+            return true
+        }
+        if (Shizuku.shouldShowRequestPermissionRationale()) {
+            toast(context, "请在 Shizuku 中允许本应用")
+            return false
+        }
+        Shizuku.requestPermission(1001)
+        false
+    } catch (t: Throwable) {
+        toast(context, "Shizuku 不可用")
+        false
+    }
+}
+
+private fun toast(context: Context, message: String) {
+    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
 }
 
 private fun versionName(context: Context): String = try {
