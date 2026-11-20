@@ -185,7 +185,22 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
             checking = true
             val info = UpdateManager.checkForUpdate(versionName(context))
             checking = false
-            if (info != null) updateInfo = info
+            if (info != null) {
+                // 自动下载并安装
+                downloading = true
+                val file = UpdateManager.download(context, info.url)
+                downloading = false
+                if (file != null) {
+                    val silent = UpdateManager.install(context, file)
+                    toast(
+                        context,
+                        if (silent) "正在静默安装 v${info.version}"
+                        else "已下载 v${info.version}，请完成安装"
+                    )
+                } else {
+                    updateInfo = info
+                }
+            }
         }
     }
 
