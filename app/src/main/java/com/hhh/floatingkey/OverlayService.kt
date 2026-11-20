@@ -1,7 +1,5 @@
 package com.hhh.floatingkey
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -19,15 +17,12 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.app.NotificationCompat
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
 class OverlayService : Service() {
 
     companion object {
-        private const val CHANNEL_ID = "floating_key_overlay"
-        private const val NOTIFICATION_ID = 1
         const val ACTION_REFRESH = "com.hhh.floatingkey.REFRESH"
 
         @Volatile
@@ -45,9 +40,9 @@ class OverlayService : Service() {
 
         fun start(context: Context) {
             try {
-                context.startForegroundService(Intent(context, OverlayService::class.java))
+                // 普通后台服务：不再显示常驻通知
+                context.startService(Intent(context, OverlayService::class.java))
             } catch (t: Throwable) {
-                // 后台启动前台服务在部分系统上会被拒绝，记录后由下次进入应用时重试
                 AppLog.log(context, "overlay", "启动悬浮按钮失败：${t.message}")
             }
         }
@@ -58,9 +53,13 @@ class OverlayService : Service() {
 
         fun refresh(context: Context) {
             if (running) {
-                context.startForegroundService(
-                    Intent(context, OverlayService::class.java).setAction(ACTION_REFRESH)
-                )
+                try {
+                    context.startService(
+                        Intent(context, OverlayService::class.java).setAction(ACTION_REFRESH)
+                    )
+                } catch (t: Throwable) {
+                    // ignore
+                }
             }
         }
     }
@@ -90,8 +89,6 @@ class OverlayService : Service() {
         super.onCreate()
         instance = this
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification())
         running = true
         addButton()
         applyVisibility(AutoSwitchService.foregroundPackage)
@@ -191,33 +188,20 @@ class OverlayService : Service() {
         if (!Prefs.isAutoSwitchEnabled(this)) return
         // 前台变化统一交给去抖器处理，这里不再直接切换
         AutoSwitchService.notifyWindow(this, pkg, "轮询")
+        // 固定应用内默认输入法不是本输入法时，直接切回来（兜底）
+        AutoSwitchService.reconcile(this)
 
+        // 未配置固定应用时，键盘弹出即切到本输入法
         if (!keyboardShown || !Prefs.isAutoSwitchOnFocus(this)) return
-        val fixed = Prefs.getFixedApps(this)
+        if (Prefs.getFixedApps(this).isNotEmpty()) return
         val foreground = pkg ?: AutoSwitchService.foregroundPackage ?: return
         if (foreground == packageName) return
         if (ImeSwitcher.isImePackage(this, foreground)) return
-        if (fixed.isNotEmpty() && !fixed.contains(foreground)) return
         if (ImeSwitcher.isOurImeActive(this)) return
         if (ImeSwitcher.trySwitchToOurs(this) == SwitchResult.OK) {
             Toast.makeText(this, "已切换到悬浮按键输入法", Toast.LENGTH_SHORT).show()
         }
     }
-
-    private fun createNotificationChannel() {
-        val channel = NotificationChannel(CHANNEL_ID, "悬浮按钮", NotificationManager.IMPORTANCE_LOW)
-        channel.setShowBadge(false)
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-    }
-
-    private fun buildNotification() =
-        NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("悬浮按键")
-            .setContentText("悬浮按钮显示中")
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
 
     private fun addButton() {
         if (buttonView != null) return

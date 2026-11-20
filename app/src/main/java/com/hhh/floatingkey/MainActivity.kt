@@ -73,9 +73,6 @@ import rikka.shizuku.Shizuku
 
 class MainActivity : ComponentActivity() {
 
-    private val notificationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
-
     private var shizukuListener: Shizuku.OnRequestPermissionResultListener? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -98,15 +95,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    MainScreen(
-                        onRequestNotificationPermission = {
-                            if (Build.VERSION.SDK_INT >= 33) {
-                                notificationPermission.launch(
-                                    android.Manifest.permission.POST_NOTIFICATIONS
-                                )
-                            }
-                        }
-                    )
+                    MainScreen()
                 }
             }
         }
@@ -126,7 +115,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
+private fun MainScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -173,7 +162,9 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
 
         // 悬浮按钮默认打开：有悬浮窗权限且用户没有手动关闭时自动启动
         val wantOverlay = Prefs.isOverlayEnabled(context) && overlayGranted
-        if (wantOverlay && !OverlayService.running) {
+        if (wantOverlay && !OverlayService.running &&
+            lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        ) {
             OverlayService.start(context)
         }
         buttonVisible = wantOverlay
@@ -612,7 +603,6 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                             Prefs.setOverlayEnabled(context, want)
                             if (want) {
                                 if (overlayGranted) {
-                                    onRequestNotificationPermission()
                                     OverlayService.start(context)
                                     buttonVisible = true
                                 } else {
