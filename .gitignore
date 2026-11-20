@@ -12,3 +12,4 @@ captures/
 *.bks
 *.p12
 uploads/
+*.idsig
