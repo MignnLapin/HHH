@@ -3,6 +3,7 @@ package com.hhh.floatingkey
 import android.Manifest
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.SystemClock
 import android.provider.Settings
@@ -52,23 +53,69 @@ object ImeSwitcher {
     @Volatile
     private var imePackagesAt = 0L
 
+    /** 已知输入法包名兜底：部分设备（如华为）的输入法不会出现在启用列表里。 */
+    private val knownImePackages = setOf(
+        "com.huawei.ohos.inputmethod",
+        "com.huawei.inputmethod",
+        "com.android.inputmethod.latin",
+        "com.google.android.inputmethod.latin",
+        "com.sohu.inputmethod.sogou",
+        "com.iflytek.inputmethod.miui",
+        "com.baidu.input",
+        "com.tencent.qqpinyin",
+        "com.tencent.wetype",
+        "com.miui.inputmethod",
+        "com.coloros.inputmethod",
+        "com.oppo.inputmethod",
+        "com.vivo.inputmethod",
+        "com.samsung.android.honeyboard"
+    )
+
     /**
      * 是否是输入法自身的窗口包名。
      * 切换默认输入法时，旧输入法的键盘窗口会关闭并抛出 TYPE_WINDOW_STATE_CHANGED，
      * 如果不排除，会被误判成「切到了别的应用」从而立刻切回原输入法。
      */
     fun isImePackage(context: Context, pkg: String): Boolean {
+        if (knownImePackages.contains(pkg)) return true
+        if (pkg.contains("inputmethod", ignoreCase = true)) return true
+        if (pkg.endsWith(".ime", ignoreCase = true)) return true
+        return installedImePackages(context).contains(pkg)
+    }
+
+    /** 汇总所有已安装输入法的包名（不依赖“已启用”状态）。 */
+    private fun installedImePackages(context: Context): Set<String> {
         val now = SystemClock.elapsedRealtime()
-        if (now - imePackagesAt > 60_000) {
-            imePackages = try {
-                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                imm.enabledInputMethodList.map { it.packageName }.toSet()
-            } catch (t: Throwable) {
-                emptySet()
-            }
-            imePackagesAt = now
+        if (now - imePackagesAt < 60_000) return imePackages
+        val result = mutableSetOf<String>()
+        try {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.inputMethodList.forEach { result.add(it.packageName) }
+            imm.enabledInputMethodList.forEach { result.add(it.packageName) }
+        } catch (t: Throwable) {
+            // ignore
         }
-        return imePackages.contains(pkg)
+        try {
+            // 查询系统里所有声明为输入法的服务，装机输入法即使未启用也能覆盖到
+            context.packageManager
+                .queryIntentServices(Intent("android.view.InputMethod"), 0)
+                .forEach { info -> info.serviceInfo?.packageName?.let(result::add) }
+        } catch (t: Throwable) {
+            // ignore
+        }
+        try {
+            Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_INPUT_METHODS
+            )?.split(':')?.forEach { id ->
+                if (id.isNotBlank()) result.add(id.substringBefore('/'))
+            }
+        } catch (t: Throwable) {
+            // ignore
+        }
+        imePackages = result
+        imePackagesAt = now
+        return result
     }
 
     private fun enabledImeIds(context: Context): List<String> {

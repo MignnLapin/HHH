@@ -15,6 +15,7 @@ object Prefs {
     private const val KEY_RESTORE_IME = "restore_ime"
     private const val KEY_PRIVILEGE_MODE = "privilege_mode"
     private const val KEY_AUTO_UPDATE = "auto_update"
+    private const val KEY_OVERLAY_ENABLED = "overlay_enabled"
 
     private fun sp(context: Context) =
         context.getSharedPreferences(FILE_NAME, Context.MODE_PRIVATE)
@@ -75,5 +76,13 @@ object Prefs {
 
     fun setAutoUpdate(context: Context, value: Boolean) {
         sp(context).edit().putBoolean(KEY_AUTO_UPDATE, value).apply()
+    }
+
+    /** 「显示悬浮按钮」开关，默认打开。 */
+    fun isOverlayEnabled(context: Context): Boolean =
+        sp(context).getBoolean(KEY_OVERLAY_ENABLED, true)
+
+    fun setOverlayEnabled(context: Context, value: Boolean) {
+        sp(context).edit().putBoolean(KEY_OVERLAY_ENABLED, value).apply()
     }
 }

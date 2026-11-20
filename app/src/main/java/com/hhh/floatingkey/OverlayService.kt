@@ -44,7 +44,12 @@ class OverlayService : Service() {
         }
 
         fun start(context: Context) {
-            context.startForegroundService(Intent(context, OverlayService::class.java))
+            try {
+                context.startForegroundService(Intent(context, OverlayService::class.java))
+            } catch (t: Throwable) {
+                // 后台启动前台服务在部分系统上会被拒绝，记录后由下次进入应用时重试
+                AppLog.log(context, "overlay", "启动悬浮按钮失败：${t.message}")
+            }
         }
 
         fun stop(context: Context) {
@@ -67,7 +72,6 @@ class OverlayService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val pollExecutor = Executors.newSingleThreadExecutor()
     private var polling = false
-    private var lastPollPkg: String? = null
 
     private val pollRunnable = object : Runnable {
         override fun run() {
@@ -76,7 +80,7 @@ class OverlayService : Service() {
                 return
             }
             pollOnce()
-            mainHandler.postDelayed(this, 1200)
+            mainHandler.postDelayed(this, pollInterval())
         }
     }
 
@@ -124,12 +128,17 @@ class OverlayService : Service() {
     }
 
     /**
-     * Root / Shizuku 模式下若未开启无障碍，则通过轮询 dumpsys 检测前台应用与键盘状态。
+     * 只要自动切换开启且有 Root / Shizuku，就持续轮询 dumpsys 作为前台来源。
+     * 无障碍事件照常接收，两路来源都会经过 AutoSwitchService 的去抖器，
+     * 重复的上报会被自动忽略，起到互相兜底的作用。
      */
     private fun shouldPoll(): Boolean =
         Prefs.isAutoSwitchEnabled(this) &&
-            Prefs.getPrivilegeMode(this) != PrivilegeMode.ADB &&
-            !AutoSwitchService.isEnabled(this)
+            Prefs.getPrivilegeMode(this) != PrivilegeMode.ADB
+
+    /** 无障碍开启时轮询只做校验，降低频率；否则作为唯一来源。 */
+    private fun pollInterval(): Long =
+        if (AutoSwitchService.isEnabled(this)) 2500L else 1200L
 
     private fun startPollingIfNeeded() {
         if (polling || !shouldPoll()) return
@@ -153,51 +162,45 @@ class OverlayService : Service() {
                 mode,
                 "dumpsys input_method | grep -m1 'mInputShown='"
             )
-            val pkg = windowDump?.let {
-                Regex("(?:u0\\s+)?([A-Za-z0-9._]+)/").find(it)?.groupValues?.get(1)
-            }
+            val pkg = parseForegroundPackage(windowDump)
             val keyboardShown = imeDump?.contains("mInputShown=true") == true
             mainHandler.post { onPolled(pkg, keyboardShown) }
         }
     }
 
+    /**
+     * 优先取 mFocusedApp：输入法弹出时 mCurrentFocus 会变成输入法窗口，
+     * 只有 mFocusedApp 才是真正的前台应用。
+     */
+    private fun parseForegroundPackage(dump: String?): String? {
+        if (dump.isNullOrBlank()) return null
+        val lines = dump.lines()
+        val ordered = lines.filter { it.contains("mFocusedApp=") } +
+            lines.filter { it.contains("mCurrentFocus=") } +
+            lines
+        return ordered.firstNotNullOfOrNull { parsePackage(it) }
+    }
+
+    private fun parsePackage(line: String): String? {
+        val match = Regex("""(?:\bu0\s+)?([A-Za-z0-9._]+)/[A-Za-z0-9._$]+""").find(line)
+            ?: return null
+        return match.groupValues.getOrNull(1)?.takeIf { it.contains('.') }
+    }
+
     private fun onPolled(pkg: String?, keyboardShown: Boolean) {
         if (!Prefs.isAutoSwitchEnabled(this)) return
+        // 前台变化统一交给去抖器处理，这里不再直接切换
+        AutoSwitchService.notifyWindow(this, pkg, "轮询")
+
+        if (!keyboardShown || !Prefs.isAutoSwitchOnFocus(this)) return
         val fixed = Prefs.getFixedApps(this)
-
-        if (pkg != null && pkg != packageName && !ImeSwitcher.isImePackage(this, pkg) &&
-            pkg != lastPollPkg
-        ) {
-            lastPollPkg = pkg
-            AutoSwitchService.setForeground(pkg)
-            when {
-                fixed.contains(pkg) -> {
-                    if (ImeSwitcher.switchToOurs(this)) {
-                        Toast.makeText(this, "已切换到悬浮按键输入法", Toast.LENGTH_SHORT).show()
-                    }
-                }
-                fixed.isNotEmpty() && ImeSwitcher.isOurImeActive(this) -> {
-                    if (ImeSwitcher.restorePrevious(this)) {
-                        Toast.makeText(this, "已切回原输入法", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        }
-
-        val effectivePkg = pkg?.takeIf {
-            it != packageName && !ImeSwitcher.isImePackage(this, it)
-        }
-        val foreground = effectivePkg ?: AutoSwitchService.foregroundPackage
-        val inFixedApp = foreground != null && fixed.contains(foreground)
-        // 配置了固定应用后，焦点切换只在固定应用内生效
-        val focusAllowed = fixed.isEmpty() || inFixedApp
-
-        if (keyboardShown && Prefs.isAutoSwitchOnFocus(this) && focusAllowed &&
-            !ImeSwitcher.isOurImeActive(this)
-        ) {
-            if (ImeSwitcher.switchToOurs(this)) {
-                Toast.makeText(this, "已切换到悬浮按键输入法", Toast.LENGTH_SHORT).show()
-            }
+        val foreground = pkg ?: AutoSwitchService.foregroundPackage ?: return
+        if (foreground == packageName) return
+        if (ImeSwitcher.isImePackage(this, foreground)) return
+        if (fixed.isNotEmpty() && !fixed.contains(foreground)) return
+        if (ImeSwitcher.isOurImeActive(this)) return
+        if (ImeSwitcher.trySwitchToOurs(this) == SwitchResult.OK) {
+            Toast.makeText(this, "已切换到悬浮按键输入法", Toast.LENGTH_SHORT).show()
         }
     }
 

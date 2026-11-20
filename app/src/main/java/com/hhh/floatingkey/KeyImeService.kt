@@ -32,8 +32,9 @@ class KeyImeService : InputMethodService() {
      */
     private val restoreRunnable = Runnable {
         val fixed = Prefs.getFixedApps(this)
-        val foreground = AutoSwitchService.foregroundPackage
-        val stayInFixedApp = foreground != null && fixed.contains(foreground)
+        // 前台未知时保持现状，避免把固定应用内的切换误恢复
+        val foreground = AutoSwitchService.foregroundPackage ?: return@Runnable
+        val stayInFixedApp = fixed.contains(foreground)
         if (stayInFixedApp) return@Runnable
         if (isInputViewShown) return@Runnable
         if (!Prefs.isAutoSwitchEnabled(this)) return@Runnable

@@ -160,7 +160,6 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         val ourId = ImeSwitcher.ourImeId(context)
         imeEnabled = imm.enabledInputMethodList.any { it.id == ourId }
         imeSelected = ImeSwitcher.currentImeId(context) == ourId
-        buttonVisible = OverlayService.running
         accessibilityOn = AutoSwitchService.isEnabled(context)
         privilegeMode = Prefs.getPrivilegeMode(context)
         privilegedReady = ImeSwitcher.canSwitchCached(context)
@@ -171,6 +170,13 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
         autoFocus = Prefs.isAutoSwitchOnFocus(context)
         fixedApps = Prefs.getFixedApps(context)
         autoUpdate = Prefs.isAutoUpdate(context)
+
+        // 悬浮按钮默认打开：有悬浮窗权限且用户没有手动关闭时自动启动
+        val wantOverlay = Prefs.isOverlayEnabled(context) && overlayGranted
+        if (wantOverlay && !OverlayService.running) {
+            OverlayService.start(context)
+        }
+        buttonVisible = wantOverlay
     }
 
     suspend fun runUpdate(notify: Boolean = false) {
@@ -603,6 +609,7 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                     Switch(
                         checked = buttonVisible,
                         onCheckedChange = { want ->
+                            Prefs.setOverlayEnabled(context, want)
                             if (want) {
                                 if (overlayGranted) {
                                     onRequestNotificationPermission()
