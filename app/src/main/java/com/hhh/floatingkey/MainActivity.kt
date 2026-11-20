@@ -24,9 +24,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenuItem
@@ -40,6 +42,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -55,6 +58,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -148,6 +152,7 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
     var downloading by remember { mutableStateOf(false) }
     var updateStatus by remember { mutableStateOf<String?>(null) }
     var pendingApk by remember { mutableStateOf<java.io.File?>(null) }
+    var logText by remember { mutableStateOf<String?>(null) }
 
     fun refreshStatuses() {
         overlayGranted = Settings.canDrawOverlays(context)
@@ -171,7 +176,7 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
     suspend fun runUpdate(notify: Boolean = false) {
         checking = true
         updateStatus = "正在检查更新…"
-        val info = UpdateManager.checkForUpdate(versionName(context))
+        val info = UpdateManager.checkForUpdate(context, versionName(context))
         checking = false
         if (info == null) {
             val error = UpdateManager.lastError
@@ -744,20 +749,6 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        OutlinedButton(
-                            enabled = !checking && !downloading,
-                            onClick = {
-                                scope.launch { runUpdate(notify = true) }
-                            }
-                        ) {
-                            Text(
-                                when {
-                                    checking -> "检查中…"
-                                    downloading -> "下载中…"
-                                    else -> "检查并更新"
-                                }
-                            )
-                        }
                     }
                     val status = updateStatus
                     if (status != null) {
@@ -767,6 +758,23 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                             color = if (status.contains("失败")) MaterialTheme.colorScheme.error
                             else MaterialTheme.colorScheme.primary
                         )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { logText = AppLog.read(context) }
+                        ) { Text("查看日志") }
+                        OutlinedButton(
+                            enabled = !checking && !downloading,
+                            onClick = { scope.launch { runUpdate(notify = true) } }
+                        ) {
+                            Text(
+                                when {
+                                    checking -> "检查中…"
+                                    downloading -> "下载中…"
+                                    else -> "检查并更新"
+                                }
+                            )
+                        }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -796,6 +804,44 @@ private fun MainScreen(onRequestNotificationPermission: () -> Unit) {
                 textAlign = TextAlign.Center
             )
         }
+    }
+
+    val log = logText
+    if (log != null) {
+        AlertDialog(
+            onDismissRequest = { logText = null },
+            title = { Text("运行日志") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        log,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { logText = null }) { Text("关闭") }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { AppLog.clear(context); logText = null }) {
+                        Text("清空")
+                    }
+                    TextButton(
+                        onClick = {
+                            clipboard.setText(AnnotatedString(log))
+                            toast(context, "日志已复制")
+                        }
+                    ) { Text("复制") }
+                }
+            }
+        )
     }
 }
 

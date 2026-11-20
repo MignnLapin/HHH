@@ -35,6 +35,9 @@ object UpdateManager {
 
     private const val REPO = "MignnLapin/HHH"
     private const val API_LATEST = "https://api.github.com/repos/$REPO/releases/latest"
+    private const val WEB_LATEST = "https://github.com/$REPO/releases/latest"
+    private const val WEB_RELEASES = "https://github.com/$REPO/releases"
+    private const val ATOM = "https://github.com/$REPO/releases.atom"
     private const val USER_AGENT = "FloatingKey"
 
     /** GitHub 下载加速镜像，直连失败时依次尝试。 */
@@ -51,25 +54,45 @@ object UpdateManager {
 
     data class Info(val version: String, val url: String, val notes: String)
 
-    suspend fun checkForUpdate(current: String): Info? = withContext(Dispatchers.IO) {
-        lastError = null
-        val viaApi = checkViaApi(current)
-        if (viaApi != null) return@withContext viaApi
-        // API 正常但没有新版本
-        if (lastError == null) return@withContext null
-        // API 失败（常见为共享 IP 触发 GitHub 限流 403），改用 github.com 网页方式
-        val apiError = lastError
-        val viaWeb = checkViaWeb(current)
-        if (viaWeb != null) {
+    suspend fun checkForUpdate(context: Context, current: String): Info? =
+        withContext(Dispatchers.IO) {
             lastError = null
-            return@withContext viaWeb
+            AppLog.log(context, "update", "开始检查更新，当前版本 $current")
+
+            val viaApi = checkViaApi(context, current)
+            if (viaApi != null) {
+                AppLog.log(context, "update", "API 检查成功：最新 ${viaApi.version}")
+                lastError = null
+                return@withContext viaApi
+            }
+            if (lastError == null) {
+                AppLog.log(context, "update", "API 检查完成：已是最新版本")
+                return@withContext null
+            }
+            val apiError = lastError
+            AppLog.log(context, "update", "API 检查失败：$apiError，改用网页方式")
+
+            lastError = null
+            val viaWeb = checkViaWeb(context, current)
+            if (viaWeb != null) {
+                AppLog.log(context, "update", "网页检查成功：最新 ${viaWeb.version}")
+                lastError = null
+                return@withContext viaWeb
+            }
+            val webError = lastError
+            if (webError == null) {
+                // 网页方式成功访问，且确认没有更新的版本
+                AppLog.log(context, "update", "网页检查完成：已是最新版本（$current）")
+                lastError = null
+                return@withContext null
+            }
+            AppLog.log(context, "update", "网页检查失败：$webError")
+            lastError = "接口：$apiError；网页：$webError"
+            null
         }
-        lastError = "$apiError；备用检查失败：${lastError ?: "网络异常"}"
-        null
-    }
 
     /** 官方 REST API：可能被共享出口 IP 的匿名限流拦成 403。 */
-    private fun checkViaApi(current: String): Info? {
+    private fun checkViaApi(context: Context, current: String): Info? {
         var attempt = 0
         while (attempt < 2) {
             attempt++
@@ -86,6 +109,7 @@ object UpdateManager {
                     connection.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
                 }
                 connection.disconnect()
+                AppLog.log(context, "update", "GET $API_LATEST -> $code")
                 if (code !in 200..299) {
                     lastError = if (code == 403) "GitHub API 访问受限（HTTP 403）" else "HTTP $code"
                     return null
@@ -115,82 +139,116 @@ object UpdateManager {
                 return Info(version, url, json.optString("body"))
             } catch (t: Throwable) {
                 lastError = t.message ?: t.javaClass.simpleName
+                AppLog.log(context, "update", "API 请求异常：${t.javaClass.simpleName}: ${t.message}")
             }
         }
         return null
     }
 
-    /** 不走 API：通过 releases/latest 重定向或 atom 订阅拿到最新版本号。 */
-    private fun checkViaWeb(current: String): Info? {
-        var tag = latestTagFromRedirect()
-        if (tag == null) tag = latestTagFromAtom()
-        if (tag == null) return null
+    /** 不走 API：通过 releases/latest 重定向、atom 订阅或发布页 HTML 拿到最新版本号。 */
+    private fun checkViaWeb(context: Context, current: String): Info? {
+        var tag = latestTagFromRedirect(context)
+        if (tag == null) tag = latestTagFromAtom(context)
+        if (tag == null) tag = latestTagFromHtml(context)
+        if (tag == null) {
+            lastError = "无法访问 github.com 发布页"
+            return null
+        }
+        AppLog.log(context, "update", "网页方式解析到最新版本：$tag")
         val version = tag.removePrefix("v").trim()
-        if (version.isEmpty()) return null
+        if (version.isEmpty()) {
+            lastError = "解析到的版本号为空"
+            return null
+        }
         if (compareVersion(version, current) <= 0) return null
-        val url = findApkUrl(tag, version)
+        val url = findApkUrl(context, tag, version)
         return Info(version, url, "")
     }
 
-    private fun latestTagFromRedirect(): String? = try {
-        val connection = URL("https://github.com/$REPO/releases/latest")
-            .openConnection() as HttpURLConnection
+    private fun latestTagFromRedirect(context: Context): String? = try {
+        val connection = URL(WEB_LATEST).openConnection() as HttpURLConnection
         connection.instanceFollowRedirects = false
         connection.connectTimeout = 15000
         connection.readTimeout = 20000
         connection.setRequestProperty("User-Agent", USER_AGENT)
         val code = connection.responseCode
         val location = connection.getHeaderField("Location")
-        connection.disconnect()
-        if (code in 300..399 && location != null) {
-            location.substringAfter("/releases/tag/", "")
-                .trim('/')
-                .takeIf { it.isNotEmpty() }
+        val body = if (code == 200) {
+            connection.inputStream.bufferedReader().use { it.readText() }
         } else {
             null
         }
+        connection.disconnect()
+        AppLog.log(context, "update", "GET $WEB_LATEST -> $code, location=$location")
+        var tag: String? = null
+        if (code in 300..399 && location != null) {
+            tag = location.substringAfter("/releases/tag/", "")
+                .trim('/')
+                .takeIf { it.isNotEmpty() && !it.contains("?") }
+        }
+        if (tag == null && body != null) {
+            tag = Regex("\"tagName\"\\s*:\\s*\"([^\"]+)\"").find(body)?.groupValues?.get(1)
+                ?: Regex("/releases/tag/([^\"<>/?]+)").find(body)?.groupValues?.get(1)
+            AppLog.log(context, "update", "重定向页 200，从 HTML 解析 tag=$tag")
+        }
+        tag
     } catch (t: Throwable) {
+        AppLog.log(context, "update", "GET $WEB_LATEST 异常：${t.javaClass.simpleName}: ${t.message}")
         null
     }
 
-    private fun latestTagFromAtom(): String? {
-        return try {
-            val body = httpGet("https://github.com/$REPO/releases.atom") ?: return null
-            Regex("/releases/tag/([^\"<>/]+)").find(body)?.groupValues?.get(1)?.trim()
-                ?.takeIf { it.isNotEmpty() }
-        } catch (t: Throwable) {
-            null
-        }
+    private fun latestTagFromAtom(context: Context): String? {
+        val body = httpGet(context, ATOM, "atom") ?: return null
+        val tag = Regex("/releases/tag/([^\"<>/]+)").find(body)?.groupValues?.get(1)?.trim()
+        AppLog.log(context, "update", "atom 解析 tag=$tag")
+        return tag?.takeIf { it.isNotEmpty() }
     }
 
-    private fun findApkUrl(tag: String, version: String): String {
+    private fun latestTagFromHtml(context: Context): String? {
+        val body = httpGet(context, WEB_RELEASES, "releases-html") ?: return null
+        val tag = Regex("/releases/tag/([^\"<>/?]+)").find(body)?.groupValues?.get(1)?.trim()
+        AppLog.log(context, "update", "发布页 HTML 解析 tag=$tag")
+        return tag?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun findApkUrl(context: Context, tag: String, version: String): String {
         // expanded_assets 是公开页面，不受 API 限流影响
-        val html = httpGet("https://github.com/$REPO/releases/expanded_assets/$tag")
+        val html = httpGet(
+            context,
+            "https://github.com/$REPO/releases/expanded_assets/$tag",
+            "expanded-assets"
+        )
         if (html != null) {
             Regex("href=\"([^\"]+\\.apk)\"", RegexOption.IGNORE_CASE)
                 .find(html)?.groupValues?.get(1)?.let { href ->
-                    return if (href.startsWith("http")) href else "https://github.com$href"
+                    val url = if (href.startsWith("http")) href else "https://github.com$href"
+                    AppLog.log(context, "update", "从资产页解析到 APK：$url")
+                    return url
                 }
         }
         // 约定命名兜底：FloatingKey-<版本>.apk
-        return "https://github.com/$REPO/releases/download/$tag/FloatingKey-$version.apk"
+        val fallback = "https://github.com/$REPO/releases/download/$tag/FloatingKey-$version.apk"
+        AppLog.log(context, "update", "资产页未解析到 APK，使用约定地址：$fallback")
+        return fallback
     }
 
-    private fun httpGet(url: String): String? = try {
+    private fun httpGet(context: Context, url: String, tag: String): String? = try {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.instanceFollowRedirects = true
         connection.connectTimeout = 15000
         connection.readTimeout = 20000
         connection.setRequestProperty("User-Agent", USER_AGENT)
         val code = connection.responseCode
-        if (code !in 200..299) {
-            connection.disconnect()
-            null
-        } else {
+        val body = if (code in 200..299) {
             connection.inputStream.bufferedReader().use { it.readText() }
-                .also { connection.disconnect() }
+        } else {
+            null
         }
+        connection.disconnect()
+        AppLog.log(context, "update", "GET $url -> $code (${body?.length ?: 0} bytes)")
+        body
     } catch (t: Throwable) {
+        AppLog.log(context, "update", "GET $url 异常：${t.javaClass.simpleName}: ${t.message}")
         null
     }
 
@@ -218,19 +276,26 @@ object UpdateManager {
         }
         var message: String? = null
         for (candidate in candidates) {
+            AppLog.log(context, "update", "开始下载：$candidate")
             val target = try {
                 downloadOnce(context, candidate)
             } catch (t: Throwable) {
                 message = t.message ?: t.javaClass.simpleName
+                AppLog.log(context, "update", "下载异常：${t.javaClass.simpleName}: ${t.message}")
                 null
             }
-            if (target != null && verifyApk(context, target)) return@withContext target
+            if (target != null && verifyApk(context, target)) {
+                AppLog.log(context, "update", "下载完成并校验通过：${target.length()} 字节")
+                return@withContext target
+            }
             if (target != null) {
                 message = "下载的安装包校验失败"
+                AppLog.log(context, "update", "安装包校验失败，删除后重试下一个源")
                 target.delete()
             }
         }
         lastError = message ?: "网络异常"
+        AppLog.log(context, "update", "所有下载源均失败：$lastError")
         null
     }
 
@@ -251,6 +316,7 @@ object UpdateManager {
                 connection.disconnect()
                 if (location == null || ++redirects > 5) {
                     lastError = "下载重定向失败"
+                    AppLog.log(context, "update", "下载重定向失败：code=$code location=$location")
                     return null
                 }
                 current = URL(location)
@@ -259,12 +325,14 @@ object UpdateManager {
             if (code != 200) {
                 connection.disconnect()
                 lastError = "下载失败（HTTP $code）"
+                AppLog.log(context, "update", "下载失败：$url -> HTTP $code")
                 return null
             }
             connection.inputStream.use { input ->
                 target.outputStream().use { output -> input.copyTo(output) }
             }
             connection.disconnect()
+            AppLog.log(context, "update", "下载响应：$url -> 200, ${target.length()} 字节")
             break
         }
         if (target.length() <= 0L) {
@@ -314,6 +382,7 @@ object UpdateManager {
     fun install(context: Context, apk: File): InstallResult {
         lastError = null
         val mode = Prefs.getPrivilegeMode(context)
+        AppLog.log(context, "install", "开始安装 v${apk.absolutePath}，权限方式=$mode")
         if (mode == PrivilegeMode.ROOT || mode == PrivilegeMode.SHIZUKU) {
             val privileged = if (mode == PrivilegeMode.ROOT) {
                 PrivilegedShell.rootAvailable || PrivilegedShell.refreshRoot()
@@ -322,19 +391,27 @@ object UpdateManager {
             }
             if (privileged) {
                 val silent = if (mode == PrivilegeMode.ROOT) {
-                    installViaRoot(apk)
+                    installViaRoot(context, apk)
                 } else {
-                    installViaShizuku(apk)
+                    installViaShizuku(context, apk)
                 }
-                if (silent) return InstallResult.SILENT
+                if (silent) {
+                    AppLog.log(context, "install", "静默安装成功")
+                    return InstallResult.SILENT
+                }
+                AppLog.log(context, "install", "静默安装失败：${lastError ?: "未知原因"}")
+            } else {
+                AppLog.log(context, "install", "未获得 $mode 权限，改为手动安装")
             }
         }
         launchInstaller(context, apk)
-        return if (context.packageManager.canRequestPackageInstalls()) {
+        val result = if (context.packageManager.canRequestPackageInstalls()) {
             InstallResult.OPENED
         } else {
             InstallResult.NEED_PERMISSION
         }
+        AppLog.log(context, "install", "拉起系统安装器：$result")
+        return result
     }
 
     /** 打开系统安装界面；没有「安装未知应用」权限时跳转授权页。 */
@@ -349,6 +426,7 @@ object UpdateManager {
                 )
             } catch (t: Throwable) {
                 lastError = "无法打开「安装未知应用」设置"
+                AppLog.log(context, "install", "打开未知来源设置失败：${t.message}")
             }
             return
         }
@@ -366,20 +444,22 @@ object UpdateManager {
             )
         } catch (t: Throwable) {
             lastError = t.message ?: "无法启动系统安装器"
+            AppLog.log(context, "install", "启动安装器失败：${t.message}")
         }
     }
 
-    private fun installViaRoot(apk: File): Boolean {
+    private fun installViaRoot(context: Context, apk: File): Boolean {
         val out = PrivilegedShell.exec(
             PrivilegeMode.ROOT,
             "pm install -r -d '${apk.absolutePath}'"
         )
+        AppLog.log(context, "install", "root pm install 输出：${out?.trim()}")
         if (out?.contains("Success", ignoreCase = true) == true) return true
         lastError = out?.trim()?.takeIf { it.isNotEmpty() } ?: "Root 安装失败"
         return false
     }
 
-    private fun installViaShizuku(apk: File): Boolean {
+    private fun installViaShizuku(context: Context, apk: File): Boolean {
         return try {
             val service = IShizukuService.Stub.asInterface(Shizuku.getBinder()) ?: return false
             if (!apk.exists() || apk.length() <= 0L) return false
@@ -398,6 +478,7 @@ object UpdateManager {
                 ParcelFileDescriptor.AutoCloseInputStream(remote.getErrorStream())
                     .bufferedReader().use { it.readText() }
             remote.destroy()
+            AppLog.log(context, "install", "shizuku pm install exit=$exit 输出：${text.trim()}")
             if (exit == 0 && text.contains("Success", ignoreCase = true)) {
                 true
             } else {
@@ -406,6 +487,7 @@ object UpdateManager {
             }
         } catch (t: Throwable) {
             lastError = t.message ?: "Shizuku 安装失败"
+            AppLog.log(context, "install", "shizuku 安装异常：${t.javaClass.simpleName}: ${t.message}")
             false
         }
     }

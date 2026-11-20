@@ -82,20 +82,31 @@ object ImeSwitcher {
     /** 切换到本应用输入法，返回具体结果便于提示。 */
     fun trySwitchToOurs(context: Context): SwitchResult {
         if (!Prefs.isAutoSwitchEnabled(context)) return SwitchResult.AUTO_OFF
-        if (!isOurImeEnabled(context)) return SwitchResult.IME_NOT_ENABLED
-        if (!canSwitch(context)) return SwitchResult.NO_PERMISSION
+        if (!isOurImeEnabled(context)) {
+            AppLog.log(context, "ime", "切换失败：本输入法未启用")
+            return SwitchResult.IME_NOT_ENABLED
+        }
+        if (!canSwitch(context)) {
+            AppLog.log(context, "ime", "切换失败：没有写入权限（${Prefs.getPrivilegeMode(context)}）")
+            return SwitchResult.NO_PERMISSION
+        }
         val ours = ourImeId(context)
         val current = currentImeId(context)
         if (current == ours) return SwitchResult.NOTHING
         if (current != null) Prefs.setRestoreIme(context, current)
-        return if (writeDefaultIme(context, ours)) SwitchResult.OK else SwitchResult.WRITE_FAILED
+        val result = if (writeDefaultIme(context, ours)) SwitchResult.OK else SwitchResult.WRITE_FAILED
+        AppLog.log(context, "ime", "切换到本输入法，原输入法=$current, 结果=$result")
+        return result
     }
 
     fun switchToOurs(context: Context): Boolean = trySwitchToOurs(context) == SwitchResult.OK
 
     /** 恢复自动切换前的输入法。 */
     fun restorePrevious(context: Context): Boolean {
-        if (!canSwitchCached(context) && !canSwitch(context)) return false
+        if (!canSwitchCached(context) && !canSwitch(context)) {
+            AppLog.log(context, "ime", "恢复输入法失败：没有写入权限")
+            return false
+        }
         val ours = ourImeId(context)
         val current = currentImeId(context)
         if (current != ours) {
@@ -107,8 +118,12 @@ object ImeSwitcher {
             ?.takeIf { it != ours && enabled.contains(it) }
             // 记录丢失时从已启用的输入法里挑一个（优先最后一个）
             ?: enabled.lastOrNull { it != ours }
-            ?: return false
+            ?: run {
+                AppLog.log(context, "ime", "恢复输入法失败：没有可用的其他输入法")
+                return false
+            }
         val ok = writeDefaultIme(context, previous)
+        AppLog.log(context, "ime", "恢复输入法 -> $previous, 结果=$ok")
         if (ok) Prefs.setRestoreIme(context, null)
         return ok
     }
