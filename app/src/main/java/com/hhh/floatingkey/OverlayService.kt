@@ -16,7 +16,6 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.TextView
-import android.widget.Toast
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
@@ -148,28 +147,39 @@ class OverlayService : Service() {
     private fun pollOnce() {
         val mode = Prefs.getPrivilegeMode(this)
         pollExecutor.execute {
-            val windowDump = PrivilegedShell.exec(
+            // 一次 shell 调用取三种信息，减少进程往返
+            val dump = PrivilegedShell.exec(
                 mode,
-                "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'"
+                "(dumpsys activity activities | grep -E 'topResumedActivity|mResumedActivity'; " +
+                    "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'; " +
+                    "dumpsys input_method | grep -m1 'mInputShown=')"
             )
-            val imeDump = PrivilegedShell.exec(
-                mode,
-                "dumpsys input_method | grep -m1 'mInputShown='"
-            )
-            val pkg = parseForegroundPackage(windowDump)
-            val focusPkg = parseCurrentFocusPackage(windowDump)
+            val pkg = parseResumedPackage(dump) ?: parseForegroundPackage(dump)
+            val focusPkg = parseCurrentFocusPackage(dump)
             // 键盘弹出时 mCurrentFocus 会变成输入法窗口，这比 mInputShown 更可靠
             val keyboardShown = if (focusPkg != null) {
                 ImeSwitcher.isImePackage(this, focusPkg)
             } else {
-                imeDump?.contains("mInputShown=true") == true
+                dump?.contains("mInputShown=true") == true
             }
             mainHandler.post { onPolled(pkg, keyboardShown) }
         }
     }
 
     /**
-     * 优先取 mFocusedApp：输入法弹出时 mCurrentFocus 会变成输入法窗口，
+     * 以 ActivityManager 的 topResumedActivity / mResumedActivity 为准，
+     * 它比窗口焦点更准确地反映用户真正所在的 Activity（分屏、弹窗场景更可靠）。
+     */
+    private fun parseResumedPackage(dump: String?): String? {
+        if (dump.isNullOrBlank()) return null
+        val lines = dump.lines()
+        val ordered = lines.filter { it.contains("topResumedActivity") } +
+            lines.filter { it.contains("mResumedActivity") }
+        return ordered.firstNotNullOfOrNull { parsePackage(it) }
+    }
+
+    /**
+     * 其次取 mFocusedApp：输入法弹出时 mCurrentFocus 会变成输入法窗口，
      * 只有 mFocusedApp 才是真正的前台应用。
      */
     private fun parseForegroundPackage(dump: String?): String? {
@@ -209,9 +219,7 @@ class OverlayService : Service() {
         if (foreground == packageName) return
         if (ImeSwitcher.isImePackage(this, foreground)) return
         if (ImeSwitcher.isOurImeActive(this)) return
-        if (ImeSwitcher.trySwitchToOurs(this) == SwitchResult.OK) {
-            Toast.makeText(this, "已切换到悬浮按键输入法", Toast.LENGTH_SHORT).show()
-        }
+        ImeSwitcher.trySwitchToOurs(this)
     }
 
     private fun addButton() {
@@ -319,7 +327,7 @@ class OverlayService : Service() {
         val keyCode = Prefs.getKeyCode(this)
         val ime = KeyImeService.instance
         if (ime == null) {
-            Toast.makeText(this, "请先启用并选择「悬浮按键输入法」", Toast.LENGTH_SHORT).show()
+            AppLog.log(this, "key", "发送按键失败：输入法未启用")
             return
         }
 
@@ -329,7 +337,7 @@ class OverlayService : Service() {
                     held = true
                     updateButtonState()
                 } else {
-                    Toast.makeText(this, "没有输入焦点，请先点按输入框", Toast.LENGTH_SHORT).show()
+                    AppLog.log(this, "key", "按下失败：没有输入焦点")
                 }
             } else {
                 ime.releaseKey()
@@ -338,7 +346,7 @@ class OverlayService : Service() {
             }
         } else {
             if (!ime.sendKey(keyCode)) {
-                Toast.makeText(this, "没有输入焦点，请先点按输入框", Toast.LENGTH_SHORT).show()
+                AppLog.log(this, "key", "发送失败：没有输入焦点")
             }
         }
     }

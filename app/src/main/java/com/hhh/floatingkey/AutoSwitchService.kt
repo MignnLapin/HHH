@@ -10,7 +10,6 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.widget.Toast
 
 /**
  * 监听前台应用与输入框焦点，自动切换输入法：
@@ -26,7 +25,7 @@ class AutoSwitchService : AccessibilityService() {
 
     companion object {
         /** 同一个前台包名持续稳定这么久才确认，用来滤掉窗口动画与各类系统弹窗。 */
-        private const val FOREGROUND_STABLE_MS = 800L
+        private const val FOREGROUND_STABLE_MS = 600L
 
         /** 离开固定应用后延迟这么久再恢复，期间又回到固定应用就取消恢复。 */
         private const val RESTORE_SETTLE_MS = 900L
@@ -41,6 +40,8 @@ class AutoSwitchService : AccessibilityService() {
             "com.miui.securitycenter",
             "com.miui.aod",
             "com.miui.powerkeeper",
+            "com.miui.contentextension",
+            "com.miui.voiceassist",
             "com.android.permissioncontroller",
             "com.google.android.permissioncontroller",
             "com.lbe.security.miui"
@@ -123,10 +124,8 @@ class AutoSwitchService : AccessibilityService() {
             val foreground = foregroundPackage ?: return
             if (!Prefs.getFixedApps(app).contains(foreground)) return
             if (ImeSwitcher.isOurImeActive(app)) return
-            when (ImeSwitcher.trySwitchToOurs(app)) {
-                SwitchResult.OK -> toast(app, "已切换到悬浮按键输入法")
-                SwitchResult.NOTHING, SwitchResult.AUTO_OFF -> Unit
-                else -> Unit
+            if (ImeSwitcher.trySwitchToOurs(app) == SwitchResult.OK) {
+                AppLog.log(app, "ime", "已切换到悬浮按键输入法（轮询校正）")
             }
         }
 
@@ -155,18 +154,14 @@ class AutoSwitchService : AccessibilityService() {
                 if (!typingMode && ImeSwitcher.isOurImeActive(app)) {
                     typingMode = true
                     AppLog.log(app, "ime", "键盘弹出，切回原输入法（前台=$foreground）")
-                    if (ImeSwitcher.restorePrevious(app)) {
-                        toast(app, "已切回原输入法，可正常输入")
-                    }
+                    ImeSwitcher.restorePrevious(app)
                 }
             } else if (typingMode) {
                 typingMode = false
                 ignoreKeyboardEnterUntil = SystemClock.elapsedRealtime() + 2500L
                 AppLog.log(app, "ime", "键盘收起，切回悬浮按键输入法（前台=$foreground）")
-                if (!ImeSwitcher.isOurImeActive(app) &&
-                    ImeSwitcher.trySwitchToOurs(app) == SwitchResult.OK
-                ) {
-                    toast(app, "已切回悬浮按键输入法")
+                if (!ImeSwitcher.isOurImeActive(app)) {
+                    ImeSwitcher.trySwitchToOurs(app)
                 }
             }
         }
@@ -187,9 +182,7 @@ class AutoSwitchService : AccessibilityService() {
             if (!ImeSwitcher.isOurImeActive(app)) return
             typingMode = true
             AppLog.log(app, "ime", "需要输入，切回原输入法（前台=$foreground）")
-            if (ImeSwitcher.restorePrevious(app)) {
-                toast(app, "已切回原输入法，可正常输入")
-            }
+            ImeSwitcher.restorePrevious(app)
         }
 
         private fun commitForeground(context: Context, pkg: String, source: String) {
@@ -226,22 +219,11 @@ class AutoSwitchService : AccessibilityService() {
         }
 
         private fun switchToOurs(context: Context) {
-            val result = ImeSwitcher.trySwitchToOurs(context)
-            when (result) {
-                SwitchResult.OK -> toast(context, "已切换到悬浮按键输入法")
-                SwitchResult.NOTHING, SwitchResult.AUTO_OFF -> Unit
-                else -> toast(context, "切换输入法失败：${result.message}")
-            }
+            ImeSwitcher.trySwitchToOurs(context)
         }
 
         private fun restorePrevious(context: Context) {
-            if (ImeSwitcher.restorePrevious(context)) {
-                toast(context, "已切回原输入法")
-            }
-        }
-
-        private fun toast(context: Context, text: String) {
-            Toast.makeText(context, text, Toast.LENGTH_SHORT).show()
+            ImeSwitcher.restorePrevious(context)
         }
 
         fun isEnabled(context: Context): Boolean {
@@ -262,6 +244,10 @@ class AutoSwitchService : AccessibilityService() {
         pendingPackage = null
         pendingRunnable?.let { mainHandler.removeCallbacks(it) }
         registerImeObserver()
+        // 开机 / 更新后无障碍服务被系统拉起时，顺带恢复悬浮按钮
+        if (Prefs.isOverlayEnabled(this) && Settings.canDrawOverlays(this)) {
+            OverlayService.start(this)
+        }
     }
 
     override fun onDestroy() {
@@ -362,9 +348,7 @@ class AutoSwitchService : AccessibilityService() {
         try {
             if (!node.isEditable) return
             if (node.isPassword) return
-            if (ImeSwitcher.trySwitchToOurs(this) == SwitchResult.OK) {
-                toast(this, "已切换到悬浮按键输入法")
-            }
+            ImeSwitcher.trySwitchToOurs(this)
         } finally {
             @Suppress("DEPRECATION")
             node.recycle()
