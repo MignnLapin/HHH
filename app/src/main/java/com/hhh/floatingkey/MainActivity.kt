@@ -646,9 +646,9 @@ private fun MainScreen() {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text("进入输入框时自动切换", style = MaterialTheme.typography.bodyLarge)
+                            Text("输入时切回原输入法", style = MaterialTheme.typography.bodyLarge)
                             Text(
-                                "焦点进入输入框时切换，键盘收起后切回",
+                                "点输入框打字时切回原输入法，键盘收起后切回本输入法",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

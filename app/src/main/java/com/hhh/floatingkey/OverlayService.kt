@@ -7,6 +7,7 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -66,6 +67,8 @@ class OverlayService : Service() {
 
     private lateinit var windowManager: WindowManager
     private var buttonView: TextView? = null
+    private var statusView: TextView? = null
+    private var lastKeyboardShown: Boolean? = null
     private var held = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -90,6 +93,7 @@ class OverlayService : Service() {
         instance = this
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         running = true
+        addStatusView()
         addButton()
         applyVisibility(AutoSwitchService.foregroundPackage)
         startPollingIfNeeded()
@@ -104,6 +108,7 @@ class OverlayService : Service() {
             buttonView?.text = Keys.buttonLabelFor(Prefs.getKeyCode(this))
             updateButtonState()
             applyVisibility(AutoSwitchService.foregroundPackage)
+            updateStatusText()
             stopPolling()
             startPollingIfNeeded()
         }
@@ -121,21 +126,28 @@ class OverlayService : Service() {
         }
         buttonView?.let { windowManager.removeView(it) }
         buttonView = null
+        statusView?.let {
+            try {
+                windowManager.removeView(it)
+            } catch (t: Throwable) {
+                // ignore
+            }
+        }
+        statusView = null
         super.onDestroy()
     }
 
     /**
-     * 只要自动切换开启且有 Root / Shizuku，就持续轮询 dumpsys 作为前台来源。
+     * 只要配置了 Root / Shizuku，就持续轮询 dumpsys：
+     * 既作为前台来源，也用于刷新左上角状态悬浮窗。
      * 无障碍事件照常接收，两路来源都会经过 AutoSwitchService 的去抖器，
      * 重复的上报会被自动忽略，起到互相兜底的作用。
      */
     private fun shouldPoll(): Boolean =
-        Prefs.isAutoSwitchEnabled(this) &&
-            Prefs.getPrivilegeMode(this) != PrivilegeMode.ADB
+        Prefs.getPrivilegeMode(this) != PrivilegeMode.ADB
 
-    /** 无障碍开启时轮询只做校验，降低频率；否则作为唯一来源。 */
-    private fun pollInterval(): Long =
-        if (AutoSwitchService.isEnabled(this)) 2500L else 1200L
+    /** 无障碍开启时轮询只做校验；统一 1.5 秒，兼顾状态悬浮窗刷新。 */
+    private fun pollInterval(): Long = 1500L
 
     private fun startPollingIfNeeded() {
         if (polling || !shouldPoll()) return
@@ -160,7 +172,13 @@ class OverlayService : Service() {
                 "dumpsys input_method | grep -m1 'mInputShown='"
             )
             val pkg = parseForegroundPackage(windowDump)
-            val keyboardShown = imeDump?.contains("mInputShown=true") == true
+            val focusPkg = parseCurrentFocusPackage(windowDump)
+            // 键盘弹出时 mCurrentFocus 会变成输入法窗口，这比 mInputShown 更可靠
+            val keyboardShown = if (focusPkg != null) {
+                ImeSwitcher.isImePackage(this, focusPkg)
+            } else {
+                imeDump?.contains("mInputShown=true") == true
+            }
             mainHandler.post { onPolled(pkg, keyboardShown) }
         }
     }
@@ -178,6 +196,12 @@ class OverlayService : Service() {
         return ordered.firstNotNullOfOrNull { parsePackage(it) }
     }
 
+    private fun parseCurrentFocusPackage(dump: String?): String? {
+        if (dump.isNullOrBlank()) return null
+        val line = dump.lines().firstOrNull { it.contains("mCurrentFocus=") } ?: return null
+        return parsePackage(line)
+    }
+
     private fun parsePackage(line: String): String? {
         val match = Regex("""(?:\bu0\s+)?([A-Za-z0-9._]+)/[A-Za-z0-9._$]+""").find(line)
             ?: return null
@@ -185,10 +209,14 @@ class OverlayService : Service() {
     }
 
     private fun onPolled(pkg: String?, keyboardShown: Boolean) {
-        if (!Prefs.isAutoSwitchEnabled(this)) return
-        // 前台变化统一交给去抖器处理，这里不再直接切换
+        lastKeyboardShown = keyboardShown
+        // 前台变化统一交给去抖器处理，这里不再直接切换（状态窗与悬浮窗显隐也要用）
         AutoSwitchService.notifyWindow(this, pkg, "轮询")
-        // 固定应用内默认输入法不是本输入法时，直接切回来（兜底）
+        updateStatusText()
+        if (!Prefs.isAutoSwitchEnabled(this)) return
+        // 固定应用内：输入时切回原输入法，收起后切回本输入法
+        AutoSwitchService.onKeyboardStateChanged(this, keyboardShown)
+        // 固定应用内默认输入法不是本输入法时，直接切回来（输入中除外）
         AutoSwitchService.reconcile(this)
 
         // 未配置固定应用时，键盘弹出即切到本输入法
@@ -257,6 +285,63 @@ class OverlayService : Service() {
         val fixed = Prefs.getFixedApps(this)
         val shouldShow = fixed.isEmpty() || pkg == null || fixed.contains(pkg)
         if (shouldShow) addButton() else removeButton()
+        updateStatusText()
+    }
+
+    /** 左上角常驻状态窗：显示当前前台应用与键盘/输入法状态。 */
+    private fun addStatusView() {
+        if (statusView != null) return
+        val density = resources.displayMetrics.density
+        val view = TextView(this).apply {
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setTextColor(Color.WHITE)
+            setPadding(
+                (8 * density).toInt(),
+                (5 * density).toInt(),
+                (8 * density).toInt(),
+                (5 * density).toInt()
+            )
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#B3000000"))
+                cornerRadius = 8 * density
+            }
+        }
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = (8 * density).toInt()
+            y = (40 * density).toInt()
+        }
+        try {
+            windowManager.addView(view, params)
+            statusView = view
+            updateStatusText()
+        } catch (t: Throwable) {
+            AppLog.log(this, "overlay", "状态悬浮窗显示失败：${t.message}")
+        }
+    }
+
+    private fun updateStatusText() {
+        val view = statusView ?: return
+        val foreground = AutoSwitchService.foregroundPackage ?: "未知"
+        val source = AutoSwitchService.lastSource ?: "—"
+        val fixed = Prefs.getFixedApps(this).contains(foreground)
+        val keyboard = when (lastKeyboardShown) {
+            true -> "显示"
+            false -> "隐藏"
+            null -> "未知"
+        }
+        val ime = if (ImeSwitcher.isOurImeActive(this)) "悬浮按键" else "原输入法"
+        view.text = "前台: $foreground\n来源: $source · 固定: ${if (fixed) "是" else "否"}\n" +
+            "键盘: $keyboard · 输入法: $ime"
     }
 
     private fun makeDragListener(params: WindowManager.LayoutParams): View.OnTouchListener {

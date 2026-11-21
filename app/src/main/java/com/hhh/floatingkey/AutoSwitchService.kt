@@ -6,6 +6,7 @@ import android.content.Context
 import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -48,6 +49,19 @@ class AutoSwitchService : AccessibilityService() {
         @Volatile
         var foregroundPackage: String? = null
             private set
+
+        /** 最近一次前台判定的来源，用于状态悬浮窗显示。 */
+        @Volatile
+        var lastSource: String? = null
+            private set
+
+        /** 是否处于“用户正在输入”状态：固定应用内键盘弹出时切回原输入法。 */
+        @Volatile
+        var typingMode = false
+            private set
+
+        /** 切回本输入法后的一小段时间内，不再因“键盘弹出”而切走，避免来回循环。 */
+        private var ignoreKeyboardEnterUntil = 0L
 
         private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -109,6 +123,8 @@ class AutoSwitchService : AccessibilityService() {
         fun reconcile(context: Context) {
             val app = context.applicationContext
             if (!Prefs.isAutoSwitchEnabled(app)) return
+            // 正在输入时保持原输入法，不要抢回来
+            if (typingMode) return
             val foreground = foregroundPackage ?: return
             if (!Prefs.getFixedApps(app).contains(foreground)) return
             if (ImeSwitcher.isOurImeActive(app)) return
@@ -119,13 +135,61 @@ class AutoSwitchService : AccessibilityService() {
             }
         }
 
+        /**
+         * 键盘状态变化（由轮询上报）：
+         * - 固定应用内键盘弹出且当前是本输入法 -> 说明用户要打字，切回原输入法
+         * - 键盘收起 -> 切回本输入法，供悬浮按钮发送按键
+         */
+        fun onKeyboardStateChanged(context: Context, keyboardShown: Boolean) {
+            val app = context.applicationContext
+            if (!Prefs.isAutoSwitchEnabled(app)) return
+            val foreground = foregroundPackage
+            if (foreground == null || !Prefs.getFixedApps(app).contains(foreground)) {
+                typingMode = false
+                return
+            }
+            if (!Prefs.isAutoSwitchOnFocus(app)) return
+            if (keyboardShown) {
+                if (SystemClock.elapsedRealtime() < ignoreKeyboardEnterUntil) return
+                if (!typingMode && ImeSwitcher.isOurImeActive(app)) {
+                    typingMode = true
+                    AppLog.log(app, "ime", "键盘弹出，切回原输入法（前台=$foreground）")
+                    if (ImeSwitcher.restorePrevious(app)) {
+                        toast(app, "已切回原输入法，可正常输入")
+                    }
+                }
+            } else if (typingMode) {
+                typingMode = false
+                ignoreKeyboardEnterUntil = SystemClock.elapsedRealtime() + 4000L
+                AppLog.log(app, "ime", "键盘收起，切回悬浮按键输入法（前台=$foreground）")
+                if (!ImeSwitcher.isOurImeActive(app) &&
+                    ImeSwitcher.trySwitchToOurs(app) == SwitchResult.OK
+                ) {
+                    toast(app, "已切回悬浮按键输入法")
+                }
+            }
+        }
+
+        private fun enterTypingMode(context: Context, foreground: String) {
+            if (typingMode) return
+            if (!Prefs.isAutoSwitchOnFocus(context)) return
+            if (!ImeSwitcher.isOurImeActive(context)) return
+            typingMode = true
+            AppLog.log(context, "ime", "输入框获得焦点，切回原输入法（前台=$foreground）")
+            if (ImeSwitcher.restorePrevious(context)) {
+                toast(context, "已切回原输入法，可正常输入")
+            }
+        }
+
         private fun commitForeground(context: Context, pkg: String, source: String) {
             if (pkg == foregroundPackage) return
             val previous = foregroundPackage
             foregroundPackage = pkg
+            lastSource = source
             lastIgnoredPackage = null
             commitGeneration++
             val generation = commitGeneration
+            typingMode = false
 
             // 悬浮窗不受自动切换开关影响，先同步显隐
             OverlayService.onForegroundChanged(pkg)
@@ -235,6 +299,8 @@ class AutoSwitchService : AccessibilityService() {
 
     private val enforceImeRunnable = Runnable {
         if (!Prefs.isAutoSwitchEnabled(this)) return@Runnable
+        // 用户正在输入时保持原输入法
+        if (typingMode) return@Runnable
         if (ImeSwitcher.isOurImeActive(this)) return@Runnable
         val foreground = foregroundPackage ?: return@Runnable
         if (!Prefs.getFixedApps(this).contains(foreground)) return@Runnable
@@ -263,20 +329,25 @@ class AutoSwitchService : AccessibilityService() {
         if (!Prefs.isAutoSwitchEnabled(this)) return
         if (!Prefs.isAutoSwitchOnFocus(this)) return
         if (ignoreReason(this, pkg) != null) return
-        if (ImeSwitcher.isOurImeActive(this)) return
 
         val fixed = Prefs.getFixedApps(this)
         if (fixed.isNotEmpty()) {
-            // 固定应用内不要求输入框可编辑：任何焦点都应回到本输入法
+            // 固定应用内：输入框获得焦点说明用户要打字，切回原输入法
             val foreground = foregroundPackage
             if (foreground == null || !fixed.contains(foreground)) return
-            if (ImeSwitcher.trySwitchToOurs(this) == SwitchResult.OK) {
-                toast(this, "已切换到悬浮按键输入法")
+            val node = source ?: return
+            try {
+                if (!node.isEditable) return
+                enterTypingMode(this, foreground)
+            } finally {
+                @Suppress("DEPRECATION")
+                node.recycle()
             }
             return
         }
 
         // 未配置固定应用：只在可编辑输入框获得焦点时切换
+        if (ImeSwitcher.isOurImeActive(this)) return
         val node = source ?: return
         try {
             if (!node.isEditable) return
