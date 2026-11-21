@@ -162,7 +162,10 @@ class OverlayService : Service() {
             } else {
                 dump?.contains("mInputShown=true") == true
             }
-            mainHandler.post { onPolled(pkg, keyboardShown) }
+            // 原输入法（非本输入法）的键盘是否弹出
+            val originalShown = focusPkg != null && focusPkg != packageName &&
+                ImeSwitcher.isImePackage(this, focusPkg)
+            mainHandler.post { onPolled(pkg, keyboardShown, originalShown) }
         }
     }
 
@@ -203,12 +206,12 @@ class OverlayService : Service() {
         return match.groupValues.getOrNull(1)?.takeIf { it.contains('.') }
     }
 
-    private fun onPolled(pkg: String?, keyboardShown: Boolean) {
+    private fun onPolled(pkg: String?, keyboardShown: Boolean, originalShown: Boolean) {
         // 前台变化统一交给去抖器处理，这里不再直接切换（悬浮窗显隐也要用）
         AutoSwitchService.notifyWindow(this, pkg, "轮询")
         if (!Prefs.isAutoSwitchEnabled(this)) return
         // 固定应用内：输入时切回原输入法，收起后切回本输入法
-        AutoSwitchService.onKeyboardStateChanged(this, keyboardShown)
+        AutoSwitchService.onKeyboardStateChanged(this, keyboardShown, originalShown)
         // 固定应用内默认输入法不是本输入法时，直接切回来（输入中除外）
         AutoSwitchService.reconcile(this)
 

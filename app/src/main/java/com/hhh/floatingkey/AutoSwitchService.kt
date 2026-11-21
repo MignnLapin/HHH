@@ -59,6 +59,15 @@ class AutoSwitchService : AccessibilityService() {
         /** 切回本输入法后的一小段时间内，不再因“键盘弹出”而切走，避免来回循环。 */
         private var ignoreKeyboardEnterUntil = 0L
 
+        /** 进入“输入模式”的时间，用于等待原输入法键盘真正弹出。 */
+        private var typingStartedAt = 0L
+
+        /** 本次输入模式中是否已确认原输入法的键盘弹出。 */
+        private var typingKeyboardSeen = false
+
+        /** 切换输入法后键盘会有短暂的收起再弹出，这段时间内不判定为“键盘收起”。 */
+        private const val TYPING_KEYBOARD_GRACE_MS = 2500L
+
         private val mainHandler = Handler(Looper.getMainLooper())
 
         /** 正在等待确认的前台包名。 */
@@ -134,31 +143,47 @@ class AutoSwitchService : AccessibilityService() {
          * - 固定应用内键盘弹出且当前是本输入法 -> 说明用户要打字，切回原输入法
          * - 键盘收起 -> 切回本输入法，供悬浮按钮发送按键
          */
-        fun onKeyboardStateChanged(context: Context, keyboardShown: Boolean) {
+        fun onKeyboardStateChanged(
+            context: Context,
+            keyboardShown: Boolean,
+            originalKeyboardShown: Boolean
+        ) {
             val app = context.applicationContext
             if (!Prefs.isAutoSwitchEnabled(app)) return
             val foreground = foregroundPackage
             if (foreground == null || !Prefs.getFixedApps(app).contains(foreground)) {
                 typingMode = false
+                typingKeyboardSeen = false
                 return
             }
             if (!Prefs.isAutoSwitchOnFocus(app)) return
+            val now = SystemClock.elapsedRealtime()
             if (keyboardShown) {
-                if (SystemClock.elapsedRealtime() < ignoreKeyboardEnterUntil) return
-                if (!typingMode && !ImeSwitcher.isOurImeActive(app)) {
-                    // 键盘由别的输入法弹出：说明用户手动切了过去要打字，先别抢回来
+                if (originalKeyboardShown) typingKeyboardSeen = true
+                if (now < ignoreKeyboardEnterUntil) return
+                if (!typingMode && originalKeyboardShown) {
+                    // 键盘由原输入法弹出：用户正在打字，不要抢回来
                     typingMode = true
-                    AppLog.log(app, "ime", "键盘由其他输入法弹出，暂停抢回（前台=$foreground）")
+                    typingStartedAt = now
+                    typingKeyboardSeen = true
+                    AppLog.log(app, "ime", "原输入法键盘弹出，暂停抢回（前台=$foreground）")
                     return
                 }
                 if (!typingMode && ImeSwitcher.isOurImeActive(app)) {
                     typingMode = true
+                    typingStartedAt = now
+                    typingKeyboardSeen = false
                     AppLog.log(app, "ime", "键盘弹出，切回原输入法（前台=$foreground）")
                     ImeSwitcher.restorePrevious(app)
                 }
             } else if (typingMode) {
+                // 刚切回原输入法时键盘会有短暂的收起/再弹出过程，等它稳定后再判断
+                if (!typingKeyboardSeen && now - typingStartedAt < TYPING_KEYBOARD_GRACE_MS) {
+                    return
+                }
                 typingMode = false
-                ignoreKeyboardEnterUntil = SystemClock.elapsedRealtime() + 2500L
+                typingKeyboardSeen = false
+                ignoreKeyboardEnterUntil = now + 2500L
                 AppLog.log(app, "ime", "键盘收起，切回悬浮按键输入法（前台=$foreground）")
                 if (!ImeSwitcher.isOurImeActive(app)) {
                     ImeSwitcher.trySwitchToOurs(app)
@@ -181,6 +206,8 @@ class AutoSwitchService : AccessibilityService() {
             if (typingMode) return
             if (!ImeSwitcher.isOurImeActive(app)) return
             typingMode = true
+            typingStartedAt = SystemClock.elapsedRealtime()
+            typingKeyboardSeen = false
             AppLog.log(app, "ime", "需要输入，切回原输入法（前台=$foreground）")
             ImeSwitcher.restorePrevious(app)
         }
@@ -193,6 +220,7 @@ class AutoSwitchService : AccessibilityService() {
             commitGeneration++
             val generation = commitGeneration
             typingMode = false
+            typingKeyboardSeen = false
 
             // 悬浮窗不受自动切换开关影响，先同步显隐
             OverlayService.onForegroundChanged(pkg)
