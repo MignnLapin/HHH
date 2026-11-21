@@ -151,6 +151,12 @@ class AutoSwitchService : AccessibilityService() {
             if (!Prefs.isAutoSwitchOnFocus(app)) return
             if (keyboardShown) {
                 if (SystemClock.elapsedRealtime() < ignoreKeyboardEnterUntil) return
+                if (!typingMode && !ImeSwitcher.isOurImeActive(app)) {
+                    // 键盘由别的输入法弹出：说明用户手动切了过去要打字，先别抢回来
+                    typingMode = true
+                    AppLog.log(app, "ime", "键盘由其他输入法弹出，暂停抢回（前台=$foreground）")
+                    return
+                }
                 if (!typingMode && ImeSwitcher.isOurImeActive(app)) {
                     typingMode = true
                     AppLog.log(app, "ime", "键盘弹出，切回原输入法（前台=$foreground）")
@@ -160,7 +166,7 @@ class AutoSwitchService : AccessibilityService() {
                 }
             } else if (typingMode) {
                 typingMode = false
-                ignoreKeyboardEnterUntil = SystemClock.elapsedRealtime() + 4000L
+                ignoreKeyboardEnterUntil = SystemClock.elapsedRealtime() + 2500L
                 AppLog.log(app, "ime", "键盘收起，切回悬浮按键输入法（前台=$foreground）")
                 if (!ImeSwitcher.isOurImeActive(app) &&
                     ImeSwitcher.trySwitchToOurs(app) == SwitchResult.OK
@@ -170,14 +176,24 @@ class AutoSwitchService : AccessibilityService() {
             }
         }
 
-        private fun enterTypingMode(context: Context, foreground: String) {
+        /**
+         * 用户要打字时切回原输入法。
+         * 由输入框焦点、键盘弹出、以及本输入法被请求弹出键盘三种信号触发，
+         * 任意一种先到就生效，其余会被 typingMode 忽略。
+         */
+        fun requestTypingMode(context: Context) {
+            val app = context.applicationContext
+            if (!Prefs.isAutoSwitchEnabled(app)) return
+            if (!Prefs.isAutoSwitchOnFocus(app)) return
+            if (SystemClock.elapsedRealtime() < ignoreKeyboardEnterUntil) return
+            val foreground = foregroundPackage ?: return
+            if (!Prefs.getFixedApps(app).contains(foreground)) return
             if (typingMode) return
-            if (!Prefs.isAutoSwitchOnFocus(context)) return
-            if (!ImeSwitcher.isOurImeActive(context)) return
+            if (!ImeSwitcher.isOurImeActive(app)) return
             typingMode = true
-            AppLog.log(context, "ime", "输入框获得焦点，切回原输入法（前台=$foreground）")
-            if (ImeSwitcher.restorePrevious(context)) {
-                toast(context, "已切回原输入法，可正常输入")
+            AppLog.log(app, "ime", "需要输入，切回原输入法（前台=$foreground）")
+            if (ImeSwitcher.restorePrevious(app)) {
+                toast(app, "已切回原输入法，可正常输入")
             }
         }
 
@@ -338,7 +354,7 @@ class AutoSwitchService : AccessibilityService() {
             val node = source ?: return
             try {
                 if (!node.isEditable) return
-                enterTypingMode(this, foreground)
+                requestTypingMode(this)
             } finally {
                 @Suppress("DEPRECATION")
                 node.recycle()

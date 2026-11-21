@@ -49,6 +49,27 @@ class KeyImeService : InputMethodService() {
         handler.postDelayed(restoreRunnable, RESTORE_DELAY_MS)
     }
 
+    /**
+     * 系统要求本输入法弹出键盘 = 用户正要打字（点了输入框）。
+     * 这是最直接的信号，不依赖无障碍焦点事件或 dumpsys 轮询，
+     * 收到后立即切回原输入法，让用户用原来的键盘输入。
+     */
+    private val typingRequestedRunnable = Runnable {
+        AutoSwitchService.requestTypingMode(this)
+    }
+
+    override fun onStartInputView(info: android.view.inputmethod.EditorInfo?, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        handler.removeCallbacks(typingRequestedRunnable)
+        handler.postDelayed(typingRequestedRunnable, 120L)
+    }
+
+    override fun onFinishInputView(finishingInput: Boolean) {
+        handler.removeCallbacks(typingRequestedRunnable)
+        super.onFinishInputView(finishingInput)
+        scheduleRestore()
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -56,6 +77,7 @@ class KeyImeService : InputMethodService() {
 
     override fun onDestroy() {
         handler.removeCallbacks(restoreRunnable)
+        handler.removeCallbacks(typingRequestedRunnable)
         releaseHeldIfAny()
         instance = null
         super.onDestroy()
@@ -87,16 +109,13 @@ class KeyImeService : InputMethodService() {
 
     override fun onFinishInput() {
         releaseHeldIfAny()
+        handler.removeCallbacks(typingRequestedRunnable)
         super.onFinishInput()
         scheduleRestore()
     }
 
-    override fun onFinishInputView(finishingInput: Boolean) {
-        super.onFinishInputView(finishingInput)
-        scheduleRestore()
-    }
-
     override fun onWindowHidden() {
+        handler.removeCallbacks(typingRequestedRunnable)
         super.onWindowHidden()
         scheduleRestore()
     }
