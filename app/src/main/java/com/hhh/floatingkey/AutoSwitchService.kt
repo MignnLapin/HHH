@@ -50,11 +50,6 @@ class AutoSwitchService : AccessibilityService() {
         var foregroundPackage: String? = null
             private set
 
-        /** 最近一次前台判定的来源，用于状态悬浮窗显示。 */
-        @Volatile
-        var lastSource: String? = null
-            private set
-
         /** 是否处于“用户正在输入”状态：固定应用内键盘弹出时切回原输入法。 */
         @Volatile
         var typingMode = false
@@ -201,7 +196,6 @@ class AutoSwitchService : AccessibilityService() {
             if (pkg == foregroundPackage) return
             val previous = foregroundPackage
             foregroundPackage = pkg
-            lastSource = source
             lastIgnoredPackage = null
             commitGeneration++
             val generation = commitGeneration
